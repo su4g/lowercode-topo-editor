@@ -42,8 +42,17 @@ let skipNextTopologyApply = false;
 let lastTopologyRenderSignature = "";
 let flowTimer: number | undefined;
 let flowOffset = 0;
+let miniViewDrag:
+  | {
+    didMove: boolean;
+    pointerId: number;
+    startDocumentPoint: GoJS.Point;
+    startPosition: GoJS.Point;
+  }
+  | null = null;
 
 const SNAP_GRID_SIZE = 10;
+const OVERVIEW_VIEWPORT_BOX_NAME = "VIEWPORT_BOX";
 
 type PortSide = "left" | "right" | "top" | "bottom";
 
@@ -691,6 +700,99 @@ function fitView() {
   diagram?.commandHandler.zoomToFit();
 }
 
+function overviewDocumentPointFromPointer(event: PointerEvent) {
+  if (!overview || !overviewEl.value) return null;
+  const go = getGo();
+  const rect = overviewEl.value.getBoundingClientRect();
+  return overview.transformViewToDoc(new go.Point(
+    event.clientX - rect.left,
+    event.clientY - rect.top
+  ));
+}
+
+function handleOverviewPointerDown(event: PointerEvent) {
+  if (!diagram || !overview || !overviewEl.value || event.button !== 0) return;
+  const documentPoint = overviewDocumentPointFromPointer(event);
+  if (!documentPoint) return;
+
+  miniViewDrag = {
+    didMove: false,
+    pointerId: event.pointerId,
+    startDocumentPoint: documentPoint.copy(),
+    startPosition: diagram.position.copy()
+  };
+  overviewEl.value.setPointerCapture(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleOverviewPointerMove(event: PointerEvent) {
+  if (!diagram || !miniViewDrag || event.pointerId !== miniViewDrag.pointerId) return;
+  const documentPoint = overviewDocumentPointFromPointer(event);
+  if (!documentPoint) return;
+
+  const go = getGo();
+  const deltaX = documentPoint.x - miniViewDrag.startDocumentPoint.x;
+  const deltaY = documentPoint.y - miniViewDrag.startDocumentPoint.y;
+  if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) miniViewDrag.didMove = true;
+
+  diagram.position = new go.Point(
+    miniViewDrag.startPosition.x + deltaX,
+    miniViewDrag.startPosition.y + deltaY
+  );
+  overview?.requestUpdate();
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleOverviewPointerEnd(event: PointerEvent) {
+  if (!diagram || !overviewEl.value || !miniViewDrag || event.pointerId !== miniViewDrag.pointerId) return;
+  const dragState = miniViewDrag;
+  miniViewDrag = null;
+  if (overviewEl.value.hasPointerCapture(event.pointerId)) overviewEl.value.releasePointerCapture(event.pointerId);
+
+  const documentPoint = overviewDocumentPointFromPointer(event);
+  if (documentPoint && !dragState.didMove) {
+    const go = getGo();
+    const viewportBounds = diagram.viewportBounds;
+    diagram.position = new go.Point(
+      documentPoint.x - viewportBounds.width / 2,
+      documentPoint.y - viewportBounds.height / 2
+    );
+  }
+  overview?.requestUpdate();
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function isRealRect(rect: GoJS.Rect) {
+  return Number.isFinite(rect.x)
+    && Number.isFinite(rect.y)
+    && Number.isFinite(rect.width)
+    && Number.isFinite(rect.height)
+    && rect.width > 0
+    && rect.height > 0;
+}
+
+function updateOverviewViewportBoxVisibility() {
+  if (!diagram || !overview?.box) return;
+  const documentBounds = diagram.documentBounds;
+  const viewportBounds = diagram.viewportBounds;
+  if (!isRealRect(documentBounds) || !isRealRect(viewportBounds)) return;
+
+  const tolerance = 1 / Math.max(diagram.scale, 0.01);
+  const topologyFitsViewport = documentBounds.x >= viewportBounds.x - tolerance
+    && documentBounds.y >= viewportBounds.y - tolerance
+    && documentBounds.right <= viewportBounds.right + tolerance
+    && documentBounds.bottom <= viewportBounds.bottom + tolerance;
+  overview.box.visible = !topologyFitsViewport;
+  overview.box.pickable = !topologyFitsViewport;
+  overview.box.selectable = !topologyFitsViewport;
+  const viewportBox = overview.box.findObject(OVERVIEW_VIEWPORT_BOX_NAME);
+  if (viewportBox) viewportBox.visible = !topologyFitsViewport;
+  overview.requestUpdate();
+}
+
 function fitRuntimeView() {
   if (!diagram) return;
   const go = getGo();
@@ -877,6 +979,8 @@ function createDiagram(el: HTMLDivElement) {
   const next = $(go.Diagram, el, {
     "undoManager.isEnabled": true,
     "animationManager.isEnabled": true,
+    allowHorizontalScroll: true,
+    allowVerticalScroll: true,
     "draggingTool.gridSnapCellSize": new go.Size(SNAP_GRID_SIZE, SNAP_GRID_SIZE),
     "draggingTool.gridSnapOrigin": new go.Point(0, 0),
     "draggingTool.isGridSnapEnabled": true,
@@ -1364,7 +1468,11 @@ function createDiagram(el: HTMLDivElement) {
 
   next.addDiagramListener("InitialLayoutCompleted", () => {
     if (props.mode === "runtime") fitRuntimeView();
+    window.setTimeout(updateOverviewViewportBoxVisibility, 0);
   });
+
+  next.addDiagramListener("ViewportBoundsChanged", () => updateOverviewViewportBoxVisibility());
+  next.addDiagramListener("DocumentBoundsChanged", () => updateOverviewViewportBoxVisibility());
 
   return next;
 }
@@ -1373,8 +1481,10 @@ function createOverview(el: HTMLDivElement, observedDiagram: GoJS.Diagram) {
   const go = getGo();
   const $ = go.GraphObject.make;
   const nextOverview = $(go.Overview, el, {
+    allowHorizontalScroll: true,
     allowMove: true,
     allowSelect: true,
+    allowVerticalScroll: true,
     isReadOnly: false,
     observed: observedDiagram,
     padding: 12,
@@ -1382,15 +1492,15 @@ function createOverview(el: HTMLDivElement, observedDiagram: GoJS.Diagram) {
       $(go.Part,
         {
           cursor: "move",
-          locationObjectName: "VIEWPORT_BOX",
+          locationObjectName: OVERVIEW_VIEWPORT_BOX_NAME,
           movable: true,
-          resizeObjectName: "VIEWPORT_BOX",
+          resizeObjectName: OVERVIEW_VIEWPORT_BOX_NAME,
           selectable: true,
           selectionAdorned: false,
-          selectionObjectName: "VIEWPORT_BOX"
+          selectionObjectName: OVERVIEW_VIEWPORT_BOX_NAME
         },
         $(go.Shape, "Rectangle", {
-          name: "VIEWPORT_BOX",
+          name: OVERVIEW_VIEWPORT_BOX_NAME,
           fill: "rgba(37, 99, 235, 0.12)",
           stroke: "#2563eb",
           strokeWidth: 2
@@ -1401,6 +1511,7 @@ function createOverview(el: HTMLDivElement, observedDiagram: GoJS.Diagram) {
   window.setTimeout(() => {
     nextOverview.requestUpdate();
     nextOverview.redraw();
+    updateOverviewViewportBoxVisibility();
   }, 0);
 
   return nextOverview;
@@ -1441,6 +1552,7 @@ function applyTopology() {
   applyingModel = false;
   overview?.requestUpdate();
   overview?.redraw();
+  updateOverviewViewportBoxVisibility();
   if (props.mode === "runtime") window.setTimeout(fitRuntimeView, 80);
 }
 
@@ -1536,7 +1648,14 @@ watch(() => props.selectedKey, syncSelectedPart);
     />
     <div class="topology-miniview">
       <div class="miniview-title">导航</div>
-      <div ref="overviewEl" class="topology-overview" />
+      <div
+        ref="overviewEl"
+        class="topology-overview"
+        @pointerdown.capture="handleOverviewPointerDown"
+        @pointermove.capture="handleOverviewPointerMove"
+        @pointerup.capture="handleOverviewPointerEnd"
+        @pointercancel.capture="handleOverviewPointerEnd"
+      />
     </div>
   </div>
 </template>
