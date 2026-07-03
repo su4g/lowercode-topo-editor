@@ -1,0 +1,25 @@
+{
+  "name": "@topo-editor/web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vue-tsc -b && vite build",
+    "typecheck": "vue-tsc -b"
+  },
+  "dependencies": {
+    "@topo-editor/topology-shared": "workspace:*",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "element-plus": "^2.10.2",
+    "gojs": "2.3.10",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.17",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^5.4.19",
+    "vue-tsc": "^2.2.10"
+  }
+}

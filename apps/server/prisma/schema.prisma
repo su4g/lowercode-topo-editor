@@ -1,0 +1,80 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model TopologyNodeType {
+  id           String   @id @default(cuid())
+  typeCode     String   @unique @map("type_code") @db.VarChar(64)
+  typeName     String   @map("type_name") @db.VarChar(128)
+  category     String   @db.VarChar(32)
+  templateCode String   @map("template_code") @db.VarChar(64)
+  icon         String?  @db.VarChar(512)
+  enabled      Boolean  @default(true)
+  sortNo       Int      @default(0) @map("sort_no")
+  configJson   Json     @map("config_json")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("topology_node_type")
+}
+
+model TopologyDataSource {
+  id         String   @id @default(cuid())
+  sourceCode String  @unique @map("source_code") @db.VarChar(64)
+  sourceName String  @map("source_name") @db.VarChar(128)
+  sourceType String  @map("source_type") @db.VarChar(32)
+  enabled    Boolean @default(true)
+  configJson Json    @map("config_json")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("topology_data_source")
+}
+
+model Topology {
+  id               String            @id @default(cuid())
+  topologyCode     String            @unique @map("topology_code") @db.VarChar(64)
+  topologyName     String            @map("topology_name") @db.VarChar(128)
+  status           String            @db.VarChar(32)
+  currentVersionId String?           @map("current_version_id")
+  remark           String?           @db.VarChar(512)
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+  versions         TopologyVersion[]
+
+  @@map("topology")
+}
+
+model TopologyVersion {
+  id          String   @id @default(cuid())
+  topologyId  String   @map("topology_id")
+  versionNo   String   @map("version_no") @db.VarChar(32)
+  versionName String?  @map("version_name") @db.VarChar(128)
+  configJson  Json     @map("config_json")
+  published   Boolean  @default(false)
+  createdBy   String?  @map("created_by") @db.VarChar(64)
+  createdAt   DateTime @default(now()) @map("created_at")
+  topology    Topology @relation(fields: [topologyId], references: [id], onDelete: Cascade)
+
+  @@index([topologyId])
+  @@map("topology_version")
+}
+
+model TopologyOperationLog {
+  id            String   @id @default(cuid())
+  topologyId    String?  @map("topology_id")
+  operationType String   @map("operation_type") @db.VarChar(64)
+  operationDesc String?  @map("operation_desc") @db.VarChar(512)
+  beforeJson    Json?    @map("before_json")
+  afterJson     Json?    @map("after_json")
+  operator      String?  @db.VarChar(64)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([topologyId])
+  @@map("topology_operation_log")
+}

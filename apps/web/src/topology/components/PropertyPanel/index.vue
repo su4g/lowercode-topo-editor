@@ -1,0 +1,2085 @@
+<script setup lang="ts">
+import { normalizeExpressionPath, type BindableFieldDefinition, type LinkRuntimeRule, type LinkStyle, type NodeStatusKey, type NodeTypeDefinition, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { ElMessage } from "element-plus";
+import { computed, reactive, ref, watch } from "vue";
+import { uploadImageAsset } from "../../services/assetApi";
+
+const props = defineProps<{
+  topology: TopologyData | null;
+  nodeTypes?: NodeTypeDefinition[];
+  selectedNode?: TopologyNode | null;
+  selectedLink?: TopologyLink | null;
+}>();
+
+const emit = defineEmits<{
+  updateNode: [key: string, patch: Partial<TopologyNode>];
+  updateLink: [key: string, patch: Partial<TopologyLink>];
+  selectItem: [key: string];
+}>();
+
+type RuleFieldOption = {
+  field: string;
+  label: string;
+  type?: BindableFieldDefinition["type"] | "unknown";
+  options?: Array<string | number | boolean>;
+};
+
+type NodeTreeRow = {
+  node: TopologyNode;
+  level: number;
+};
+
+const runningRuleForm = reactive({
+  nodeKey: "",
+  sourceId: "",
+  field: "state",
+  customField: "",
+  value: "closed",
+  lineState: "off" as NonNullable<LinkRuntimeRule["action"]["state"]>,
+  priority: 10,
+  color: "#42B0FF",
+  width: 3,
+  flowDirection: "fromTo" as LinkStyle["flowDirection"]
+});
+let activeRuleLinkKey = "";
+
+const nodeStatusRuleForm = reactive({
+  sourceId: "",
+  field: "status",
+  customField: "",
+  value: "normal",
+  priority: 10,
+  status: "default",
+  color: "#94a3b8"
+});
+let activeRuleNodeKey = "";
+
+const buttonVisibilityRuleForm = reactive({
+  sourceType: "metaData" as "metaData" | "node",
+  metaField: "qfStatus.button1",
+  nodeKey: "",
+  sourceId: "",
+  field: "status",
+  customField: "",
+  value: "show",
+  visible: true,
+  priority: 10
+});
+
+const nodeEventForm = reactive({
+  enabled: true,
+  trigger: "click" as NonNullable<TopologyNode["eventConfig"]>[number]["trigger"],
+  eventName: "nodeClick",
+  eventKey: "",
+  eventDataText: "{}",
+  eventDataTemplateText: "{}",
+  bindNodeKey: "",
+  bindDataPath: ""
+});
+
+const nodeStatusOptions: Array<{ label: string; value: NodeStatusKey; color: string }> = [
+  { label: "默认", value: "default", color: "#94a3b8" },
+  { label: "运行", value: "running", color: "#22c55e" },
+  { label: "故障", value: "fault", color: "#ef4444" },
+  { label: "离线", value: "offline", color: "#64748b" }
+];
+
+const linkStateOptions: Array<{ label: string; value: NonNullable<LinkRuntimeRule["action"]["state"]>; color: string }> = [
+  { label: "默认", value: "off", color: "#42B0FF" },
+  { label: "运行", value: "running", color: "#22c55e" },
+  { label: "告警", value: "warning", color: "#f59e0b" },
+  { label: "故障", value: "fault", color: "#ef4444" },
+  { label: "离线", value: "offline", color: "#64748b" }
+];
+const buttonImageInputRef = ref<HTMLInputElement | null>(null);
+const uploadingButtonImage = ref(false);
+
+function parseSize(size?: string) {
+  const [width, height] = (size ?? "").split(/\s+/).map((item) => Number(item));
+  return {
+    width: Number.isFinite(width) && width > 0 ? Math.round(width) : 0,
+    height: Number.isFinite(height) && height > 0 ? Math.round(height) : 0
+  };
+}
+
+function updateLabel(value: string) {
+  if (!props.selectedNode || !value.trim()) return;
+  emit("updateNode", props.selectedNode.key, { label: value.trim() });
+}
+
+function nodeIdentifier(node: TopologyNode) {
+  const identifier = node.props?.identifier;
+  return typeof identifier === "string" ? identifier : "";
+}
+
+function updateIdentifier(value: string) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, {
+    props: {
+      ...(props.selectedNode.props ?? {}),
+      identifier: value.trim()
+    }
+  });
+}
+
+function updateSelectedNodeProps(patch: Record<string, unknown>) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, {
+    props: {
+      ...(props.selectedNode.props ?? {}),
+      ...patch
+    }
+  });
+}
+
+function nodeTextTemplate(node: TopologyNode) {
+  const template = node.props?.textTemplate;
+  return typeof template === "string" ? template : "";
+}
+
+function nodeTextColor(node: TopologyNode) {
+  const color = node.props?.textColor;
+  return typeof color === "string" && color.trim() ? color : "#111827";
+}
+
+function nodeTextSize(node: TopologyNode) {
+  const size = Number(node.props?.textSize);
+  return Number.isFinite(size) && size > 0 ? Math.round(size) : 14;
+}
+
+function updateAnnotationTextTemplate(value: string) {
+  updateSelectedNodeProps({ textTemplate: value });
+}
+
+function updateAnnotationTextColor(value: string) {
+  updateSelectedNodeProps({ textColor: value });
+}
+
+function updateAnnotationTextSize(value: string) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size <= 0) return;
+  updateSelectedNodeProps({ textSize: Math.round(size) });
+}
+
+function buttonRenderMode(node: TopologyNode) {
+  const mode = node.props?.buttonRenderMode;
+  return mode === "image" || mode === "imageText" || mode === "text" ? mode : "text";
+}
+
+function buttonText(node: TopologyNode) {
+  const text = node.props?.buttonText;
+  return typeof text === "string" ? text : node.label;
+}
+
+function buttonImage(node: TopologyNode) {
+  const icon = node.props?.icon;
+  return typeof icon === "string" ? icon : "";
+}
+
+function updateButtonText(value: string) {
+  updateSelectedNodeProps({ buttonText: value });
+}
+
+function updateButtonRenderMode(value: string) {
+  updateSelectedNodeProps({ buttonRenderMode: value });
+}
+
+function updateButtonImage(value: string) {
+  updateSelectedNodeProps({ icon: value });
+}
+
+function chooseButtonImage() {
+  buttonImageInputRef.value?.click();
+}
+
+async function handleButtonImageChange(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  const isSvg = file.name.toLowerCase().endsWith(".svg");
+  if (!file.type.startsWith("image/") && !isSvg) {
+    ElMessage.error("请选择图片文件");
+    return;
+  }
+
+  uploadingButtonImage.value = true;
+  try {
+    const result = await uploadImageAsset(file);
+    updateButtonImage(result.url);
+    ElMessage.success("按钮图片已上传");
+  } finally {
+    uploadingButtonImage.value = false;
+  }
+}
+
+function updateShowLabel(value: boolean) {
+  updateSelectedNodeProps({ showLabel: value });
+}
+
+function updateTransparentBackground(value: boolean) {
+  updateSelectedNodeProps({ transparentBackground: value });
+}
+
+function groupBackgroundOpacity(node: TopologyNode) {
+  const opacity = Number(node.props?.backgroundOpacity);
+  return Number.isFinite(opacity) ? Math.max(0, Math.min(100, Math.round(opacity))) : 100;
+}
+
+function updateBackgroundOpacity(value: string) {
+  const opacity = Number(value);
+  if (!Number.isFinite(opacity)) return;
+  updateSelectedNodeProps({ backgroundOpacity: Math.max(0, Math.min(100, Math.round(opacity))) });
+}
+
+function updateDashedBorder(value: boolean) {
+  updateSelectedNodeProps({ dashedBorder: value });
+}
+
+function updateSize(field: "width" | "height", value: string) {
+  if (!props.selectedNode) return;
+  const size = parseSize(props.selectedNode.size);
+  const nextValue = Math.round(Number(value) || 0);
+  if (nextValue <= 0) return;
+  const nextSize = { ...size, [field]: nextValue };
+  emit("updateNode", props.selectedNode.key, { size: `${nextSize.width} ${nextSize.height}` });
+}
+
+function updateAngle(value: string) {
+  if (!props.selectedNode || props.selectedNode.isGroup) return;
+  const nextValue = Number(value);
+  if (!Number.isFinite(nextValue)) return;
+  emit("updateNode", props.selectedNode.key, { angle: Math.round(nextValue * 100) / 100 });
+}
+
+function nodeZOrder(node: TopologyNode) {
+  return Number.isFinite(node.zOrder) ? Number(node.zOrder) : 0;
+}
+
+function orderedLayerNodes() {
+  return [...(props.topology?.nodes ?? [])].sort((left, right) => {
+    const delta = nodeZOrder(left) - nodeZOrder(right);
+    return delta || left.key.localeCompare(right.key);
+  });
+}
+
+function updateNodeZOrder(zOrder: number) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, { zOrder });
+}
+
+function moveSelectedLayer(direction: "up" | "down") {
+  if (!props.selectedNode) return;
+  const ordered = orderedLayerNodes();
+  const index = ordered.findIndex((node) => node.key === props.selectedNode?.key);
+  const targetIndex = direction === "up" ? index + 1 : index - 1;
+  const target = ordered[targetIndex];
+  if (index < 0 || !target) return;
+  updateNodeZOrder(nodeZOrder(target));
+  emit("updateNode", target.key, { zOrder: nodeZOrder(props.selectedNode) });
+}
+
+function moveSelectedToTop() {
+  if (!props.selectedNode) return;
+  const maxZOrder = Math.max(0, ...(props.topology?.nodes ?? []).map(nodeZOrder));
+  updateNodeZOrder(maxZOrder + 1);
+}
+
+function moveSelectedToBottom() {
+  if (!props.selectedNode) return;
+  const minZOrder = Math.min(0, ...(props.topology?.nodes ?? []).map(nodeZOrder));
+  updateNodeZOrder(minZOrder - 1);
+}
+
+function updateRuntimeColor(field: "backgroundColor" | "borderColor", value: string) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, {
+    runtime: {
+      ...props.selectedNode.runtime,
+      [field]: value
+    }
+  });
+}
+
+function updateLinkLabel(value: string) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, { label: value.trim() || undefined });
+}
+
+function jsonText(value: unknown) {
+  return JSON.stringify(value ?? {}, null, 2);
+}
+
+function parseJsonObject(value: string) {
+  try {
+    const parsed = value.trim() ? JSON.parse(value) : {};
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function defaultEventKey(node: TopologyNode) {
+  return nodeIdentifier(node) || node.key;
+}
+
+function resetNodeEventForm(node: TopologyNode) {
+  nodeEventForm.enabled = true;
+  nodeEventForm.trigger = "click";
+  nodeEventForm.eventName = "nodeClick";
+  nodeEventForm.eventKey = defaultEventKey(node);
+  nodeEventForm.eventDataText = "{}";
+  nodeEventForm.eventDataTemplateText = "{}";
+  nodeEventForm.bindNodeKey = node.key;
+  nodeEventForm.bindDataPath = "";
+}
+
+function addNodeEventConfig() {
+  if (!props.selectedNode || !nodeEventForm.eventName.trim() || !nodeEventForm.eventKey.trim()) return;
+  const eventData = parseJsonObject(nodeEventForm.eventDataText);
+  const eventDataTemplate = parseJsonObject(nodeEventForm.eventDataTemplateText);
+  if (!eventData || !eventDataTemplate) return;
+
+  emit("updateNode", props.selectedNode.key, {
+    eventConfig: [
+      ...(props.selectedNode.eventConfig ?? []),
+      {
+        id: createRuleId("node_event"),
+        enabled: nodeEventForm.enabled,
+        trigger: nodeEventForm.trigger,
+        eventName: nodeEventForm.eventName.trim(),
+        eventKey: nodeEventForm.eventKey.trim(),
+        eventData,
+        eventDataTemplate,
+        bindNodeKey: nodeEventForm.bindNodeKey || undefined,
+        bindDataPath: nodeEventForm.bindDataPath.trim() || undefined
+      }
+    ]
+  });
+}
+
+function removeNodeEventConfig(eventId: string | undefined, index: number) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, {
+    eventConfig: (props.selectedNode.eventConfig ?? []).filter((event, eventIndex) => {
+      return eventId ? event.id !== eventId : eventIndex !== index;
+    })
+  });
+}
+
+function describeNodeEventConfig(event: NonNullable<TopologyNode["eventConfig"]>[number]) {
+  return `${event.trigger} / ${event.eventName} / ${event.eventKey}`;
+}
+
+function updateLinkDirection(value: TopologyLink["direction"]) {
+  if (!props.selectedLink || !value) return;
+  emit("updateLink", props.selectedLink.key, { direction: value });
+}
+
+function updateLinkArrow(value: boolean) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, { showArrow: value });
+}
+
+function updateLinkDefaultStyle(field: keyof LinkStyle, value: string | number | boolean) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, {
+    defaultStyle: {
+      ...(props.selectedLink.defaultStyle ?? {}),
+      [field]: value
+    }
+  });
+}
+
+function updateLinkFlowDirection(value: LinkStyle["flowDirection"]) {
+  if (!value) return;
+  updateLinkDefaultStyle("flowDirection", value);
+}
+
+function createRuleId(prefix: string) {
+  return `${prefix}_${Date.now()}_${Math.round(Math.random() * 1000)}`;
+}
+
+const availableRuleNodes = computed(() => props.topology?.nodes ?? []);
+
+const ruleDataSources = computed(() => (props.topology?.dataSources ?? []).filter((source) => source.enabled !== false));
+
+const showRuleSourceSelect = computed(() => ruleDataSources.value.length > 1);
+
+const selectedRuleNode = computed(() => nodeByKey(runningRuleForm.nodeKey));
+
+const selectedRuleNodeFieldOptions = computed(() => fieldOptionsForNode(selectedRuleNode.value));
+
+const selectedNodeFieldOptions = computed(() => fieldOptionsForNode(props.selectedNode ?? null));
+
+const selectedButtonRuleNode = computed(() => nodeByKey(buttonVisibilityRuleForm.nodeKey));
+
+const selectedButtonRuleNodeFieldOptions = computed(() => fieldOptionsForNode(selectedButtonRuleNode.value));
+
+const activeKey = computed(() => props.selectedNode?.key ?? props.selectedLink?.key ?? "");
+
+const nodeTreeRows = computed<NodeTreeRow[]>(() => {
+  const nodes = props.topology?.nodes ?? [];
+  const childrenByGroup = new Map<string, TopologyNode[]>();
+  for (const node of nodes) {
+    if (!node.group) continue;
+    const children = childrenByGroup.get(node.group) ?? [];
+    children.push(node);
+    childrenByGroup.set(node.group, children);
+  }
+
+  const rows: NodeTreeRow[] = [];
+  const visited = new Set<string>();
+  const visit = (node: TopologyNode, level: number) => {
+    if (visited.has(node.key)) return;
+    visited.add(node.key);
+    rows.push({ node, level });
+    for (const child of childrenByGroup.get(node.key) ?? []) visit(child, level + 1);
+  };
+
+  for (const node of nodes.filter((item) => !item.group || !nodes.some((parent) => parent.key === item.group))) {
+    visit(node, 0);
+  }
+  for (const node of nodes) visit(node, 0);
+  return rows;
+});
+
+function selectItem(key: string) {
+  emit("selectItem", key);
+}
+
+function nodeTreeTypeLabel(node: TopologyNode) {
+  if (node.isGroup) return "组";
+  const nodeType = nodeTypeOf(node.typeId);
+  if (nodeType?.category === "annotation") return "标注";
+  return "节点";
+}
+
+function linkTreeLabel(link: TopologyLink) {
+  return link.label || `${nodeByKey(link.from)?.label ?? link.from} -> ${nodeByKey(link.to)?.label ?? link.to}`;
+}
+
+function nodeByKey(key: string) {
+  return props.topology?.nodes.find((node) => node.key === key) ?? null;
+}
+
+function nodeTypeOf(typeId: string) {
+  return props.nodeTypes?.find((nodeType) => nodeType.id === typeId);
+}
+
+const selectedNodeType = computed(() => props.selectedNode ? nodeTypeOf(props.selectedNode.typeId) : undefined);
+
+const isSelectedAnnotationNode = computed(() => selectedNodeType.value?.category === "annotation");
+
+const isSelectedControlNode = computed(() => selectedNodeType.value?.category === "control" || selectedNodeType.value?.template === "buttonTemplate");
+
+const availableParentGroups = computed(() => {
+  const selected = props.selectedNode ?? null;
+  if (!selected) return [];
+  return (props.topology?.nodes ?? []).filter((node) => canAssignToGroup(selected, node));
+});
+
+const selectedNodeStatusOptions = computed(() => nodeStatusOptions.map((status) => ({
+  ...status,
+  image: selectedNodeType.value?.statusImages?.[status.value]
+})));
+
+const selectedNodeStatusOption = computed(() => {
+  return selectedNodeStatusOptions.value.find((status) => status.value === nodeStatusRuleForm.status)
+    ?? selectedNodeStatusOptions.value[0];
+});
+
+function isImageIcon(icon?: string) {
+  return !!icon && (
+    /^https?:\/\//.test(icon)
+    || icon.startsWith("data:image/")
+    || /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(icon)
+  );
+}
+
+function isInGroupChain(node: TopologyNode, groupKey: string) {
+  let currentGroupKey = node.group;
+  while (currentGroupKey) {
+    if (currentGroupKey === groupKey) return true;
+    currentGroupKey = nodeByKey(currentGroupKey)?.group;
+  }
+  return false;
+}
+
+function canAssignToGroup(node: TopologyNode | null, groupNode: TopologyNode) {
+  if (!node || !groupNode.isGroup || node.key === groupNode.key) return false;
+  if (node.isGroup && isInGroupChain(groupNode, node.key)) return false;
+  const groupType = nodeTypeOf(groupNode.typeId);
+  const nodeType = nodeTypeOf(node.typeId);
+  if (!groupType || !nodeType) return false;
+  if (nodeType.isGroup && !groupType.allowNestedGroup) return false;
+  if (!groupType.canContain?.length) return true;
+  return groupType.canContain.includes(nodeType.id) || groupType.canContain.includes(nodeType.category);
+}
+
+function updateNodeGroup(groupKey: string) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, { group: groupKey || undefined });
+}
+
+function addFieldOption(options: RuleFieldOption[], option: RuleFieldOption) {
+  if (!option.field || options.some((item) => item.field === option.field)) return;
+  options.push(option);
+}
+
+function fieldOptionsForNode(node: TopologyNode | null): RuleFieldOption[] {
+  if (!node) return [{ field: "state", label: "状态", type: "string" }];
+
+  const options: RuleFieldOption[] = [];
+  const nodeType = nodeTypeOf(node.typeId);
+
+  for (const field of nodeType?.bindableFields ?? []) {
+    addFieldOption(options, {
+      field: field.field,
+      label: field.label,
+      type: field.type,
+      options: field.options
+    });
+  }
+
+  for (const [alias, path] of Object.entries(node.dataBinding?.mappings ?? {})) {
+    addFieldOption(options, {
+      field: alias,
+      label: `${alias}${path && path !== alias ? `（${path}）` : ""}`,
+      type: "unknown"
+    });
+  }
+
+  for (const key of Object.keys(node.props ?? {})) {
+    addFieldOption(options, { field: key, label: key, type: "unknown" });
+  }
+
+  for (const key of Object.keys(node.runtime ?? {})) {
+    addFieldOption(options, { field: key, label: `运行态.${key}`, type: "unknown" });
+  }
+
+  addFieldOption(options, { field: "state", label: "状态", type: "string" });
+  return options;
+}
+
+function selectedRuleFieldOption() {
+  if (runningRuleForm.field === "__custom__") return undefined;
+  return selectedRuleNodeFieldOptions.value.find((option) => option.field === runningRuleForm.field);
+}
+
+function selectedNodeRuleFieldOption() {
+  if (nodeStatusRuleForm.field === "__custom__") return undefined;
+  return selectedNodeFieldOptions.value.find((option) => option.field === nodeStatusRuleForm.field);
+}
+
+function selectedButtonRuleFieldOption() {
+  if (buttonVisibilityRuleForm.field === "__custom__") return undefined;
+  return selectedButtonRuleNodeFieldOptions.value.find((option) => option.field === buttonVisibilityRuleForm.field);
+}
+
+function effectiveRunningRuleField() {
+  return runningRuleForm.field === "__custom__"
+    ? runningRuleForm.customField.trim()
+    : runningRuleForm.field;
+}
+
+function effectiveNodeStatusRuleField() {
+  return nodeStatusRuleForm.field === "__custom__"
+    ? nodeStatusRuleForm.customField.trim()
+    : nodeStatusRuleForm.field;
+}
+
+function effectiveButtonVisibilityRuleField() {
+  if (buttonVisibilityRuleForm.sourceType === "metaData") return buttonVisibilityRuleForm.metaField.trim();
+  return buttonVisibilityRuleForm.field === "__custom__"
+    ? buttonVisibilityRuleForm.customField.trim()
+    : buttonVisibilityRuleForm.field;
+}
+
+function isAbsoluteRuleField(field: string) {
+  const normalizedField = normalizeExpressionPath(field);
+  const target = normalizedField.split(".")[0];
+  if (!target || target === normalizedField) return false;
+  if (["metaData", "mateData", "runtimeData"].includes(target)) return true;
+  if (props.topology?.nodes.some((node) => node.key === target)) return true;
+  if (props.topology?.dataSources?.some((source) => source.sourceId === target)) return true;
+  return false;
+}
+
+function scopedRuleField(scopeKey: string, field: string) {
+  const normalizedField = normalizeExpressionPath(field);
+  if (isAbsoluteRuleField(normalizedField) || !scopeKey) return normalizedField;
+  return `${scopeKey}.${normalizedField}`;
+}
+
+function normalizeDataKey(value: string | undefined) {
+  return (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function preferredNodeDataKey(node: TopologyNode | null) {
+  const configuredIdentifier = typeof node?.props?.identifier === "string" ? node.props.identifier : "";
+  if (normalizeDataKey(configuredIdentifier)) return normalizeDataKey(configuredIdentifier);
+  return normalizeDataKey(node?.label)
+    || normalizeDataKey(node?.key)
+    || normalizeDataKey(node?.typeId);
+}
+
+function expressionFieldWithSource(node: TopologyNode | null, field: string, sourceId: string) {
+  const normalizedField = normalizeExpressionPath(field);
+  if (isAbsoluteRuleField(normalizedField)) return normalizedField;
+  if (!sourceId) return scopedRuleField(node?.key ?? "", normalizedField);
+  if (normalizedField.includes(".")) return `${sourceId}.${normalizedField}`;
+  const dataKey = preferredNodeDataKey(node);
+  return dataKey ? `${sourceId}.data.${dataKey}.${normalizedField}` : `${sourceId}.${normalizedField}`;
+}
+
+function defaultRuleSourceId(node: TopologyNode | null) {
+  if (node?.dataBinding?.sourceId && ruleDataSources.value.some((source) => source.sourceId === node.dataBinding?.sourceId)) {
+    return node.dataBinding.sourceId;
+  }
+  return ruleDataSources.value[0]?.sourceId ?? "";
+}
+
+function ensureRuleSourceSelection() {
+  if (!showRuleSourceSelect.value) {
+    nodeStatusRuleForm.sourceId = "";
+    runningRuleForm.sourceId = "";
+    buttonVisibilityRuleForm.sourceId = "";
+    return;
+  }
+  if (!ruleDataSources.value.some((source) => source.sourceId === nodeStatusRuleForm.sourceId)) {
+    nodeStatusRuleForm.sourceId = defaultRuleSourceId(props.selectedNode ?? null);
+  }
+  if (!ruleDataSources.value.some((source) => source.sourceId === runningRuleForm.sourceId)) {
+    runningRuleForm.sourceId = defaultRuleSourceId(selectedRuleNode.value);
+  }
+  if (!ruleDataSources.value.some((source) => source.sourceId === buttonVisibilityRuleForm.sourceId)) {
+    buttonVisibilityRuleForm.sourceId = defaultRuleSourceId(selectedButtonRuleNode.value);
+  }
+}
+
+function normalizeValueForField(field: RuleFieldOption | undefined, value: string) {
+  if (field?.type === "number") {
+    const nextValue = Number(value);
+    return Number.isFinite(nextValue) ? nextValue : value;
+  }
+  if (field?.type === "boolean") return value === "true";
+
+  const optionValue = field?.options?.find((option) => String(option) === value);
+  return optionValue ?? value;
+}
+
+function normalizeRuleValue(value: string) {
+  return normalizeValueForField(selectedRuleFieldOption(), value);
+}
+
+function normalizeNodeStatusRuleValue(value: string) {
+  return normalizeValueForField(selectedNodeRuleFieldOption(), value);
+}
+
+function normalizeButtonVisibilityRuleValue(value: string) {
+  return normalizeValueForField(
+    buttonVisibilityRuleForm.sourceType === "node" ? selectedButtonRuleFieldOption() : undefined,
+    value
+  );
+}
+
+function updateRunningRuleNode(nodeKey: string) {
+  runningRuleForm.nodeKey = nodeKey;
+  const fields = selectedRuleNodeFieldOptions.value;
+  if (!fields.some((field) => field.field === runningRuleForm.field)) {
+    runningRuleForm.field = fields[0]?.field ?? "state";
+  }
+  if (showRuleSourceSelect.value) runningRuleForm.sourceId = defaultRuleSourceId(selectedRuleNode.value);
+}
+
+function updateButtonVisibilityRuleNode(nodeKey: string) {
+  buttonVisibilityRuleForm.nodeKey = nodeKey;
+  const fields = selectedButtonRuleNodeFieldOptions.value;
+  if (!fields.some((field) => field.field === buttonVisibilityRuleForm.field)) {
+    buttonVisibilityRuleForm.field = fields.some((field) => field.field === "status")
+      ? "status"
+      : fields[0]?.field ?? "status";
+  }
+  if (showRuleSourceSelect.value) buttonVisibilityRuleForm.sourceId = defaultRuleSourceId(selectedButtonRuleNode.value);
+}
+
+function updateButtonVisibilityRuleField(field: string) {
+  buttonVisibilityRuleForm.field = field;
+  const option = selectedButtonRuleFieldOption();
+  if (option?.options?.length) buttonVisibilityRuleForm.value = String(option.options[0]);
+  else if (option?.type === "boolean") buttonVisibilityRuleForm.value = "true";
+}
+
+function updateNodeStatusRuleField(field: string) {
+  nodeStatusRuleForm.field = field;
+  const option = selectedNodeRuleFieldOption();
+  if (option?.options?.length) nodeStatusRuleForm.value = String(option.options[0]);
+  else if (option?.type === "boolean") nodeStatusRuleForm.value = "true";
+}
+
+function updateNodeRuleStatus(status: string) {
+  nodeStatusRuleForm.status = status;
+  const option = selectedNodeStatusOptions.value.find((item) => item.value === status);
+  if (option) nodeStatusRuleForm.color = option.color;
+}
+
+function updateLinkRuleState(state: NonNullable<LinkRuntimeRule["action"]["state"]>) {
+  runningRuleForm.lineState = state;
+  const option = linkStateOptions.find((item) => item.value === state);
+  if (option) runningRuleForm.color = option.color;
+}
+
+function updateLinkRuleStateFromValue(value: string) {
+  if (linkStateOptions.some((item) => item.value === value)) {
+    updateLinkRuleState(value as NonNullable<LinkRuntimeRule["action"]["state"]>);
+  }
+}
+
+function selectedLinkEndpointNodes() {
+  if (!props.selectedLink) return [];
+  return [nodeByKey(props.selectedLink.from), nodeByKey(props.selectedLink.to)].filter(Boolean) as TopologyNode[];
+}
+
+function hasMapping(node: TopologyNode, candidates: string[]) {
+  const entries = Object.entries(node.dataBinding?.mappings ?? {});
+  return entries.some(([alias, path]) => candidates.includes(alias) || candidates.includes(path));
+}
+
+function chooseBoundField(node: TopologyNode | null, candidates: string[], fallback: string) {
+  if (!node) return fallback;
+  const entries = Object.entries(node.dataBinding?.mappings ?? {});
+  const matched = entries.find(([alias, path]) => candidates.includes(alias) || candidates.includes(path));
+  return matched?.[0] ?? fallback;
+}
+
+function chooseBreakerRuleNode() {
+  const nodes = selectedLinkEndpointNodes();
+  return nodes.find((node) => node.typeId.includes("breaker"))
+    ?? nodes.find((node) => hasMapping(node, ["state", "breakerState"]))
+    ?? nodes[0]
+    ?? null;
+}
+
+function chooseVoltageRuleNode() {
+  const nodes = selectedLinkEndpointNodes();
+  return nodes.find((node) => hasMapping(node, ["outputVoltage", "voltage", "U"]))
+    ?? nodes[1]
+    ?? nodes[0]
+    ?? null;
+}
+
+function addLinkRule(rule: LinkRuntimeRule) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, {
+    rules: [
+      ...(props.selectedLink.rules ?? []),
+      rule
+    ]
+  });
+}
+
+function addNodeStatusRule() {
+  if (!props.selectedNode) return;
+  const ruleField = effectiveNodeStatusRuleField();
+  if (!ruleField) return;
+  const value = normalizeNodeStatusRuleValue(nodeStatusRuleForm.value);
+  const sourceId = nodeStatusRuleForm.sourceId || defaultRuleSourceId(props.selectedNode);
+  const field = expressionFieldWithSource(props.selectedNode, ruleField, sourceId);
+
+  emit("updateNode", props.selectedNode.key, {
+    displayRules: [
+      ...(props.selectedNode.displayRules ?? []),
+      {
+        id: createRuleId("rule_node_status"),
+        name: `${props.selectedNode.label}.${ruleField} = ${String(value)} 时状态为 ${nodeStatusRuleForm.status}`,
+        priority: Number.isFinite(nodeStatusRuleForm.priority) ? Math.round(nodeStatusRuleForm.priority) : 10,
+        condition: {
+          logic: "and",
+          conditions: [
+            {
+              field,
+              operator: "eq",
+              value
+            }
+          ]
+        },
+        action: {
+          status: nodeStatusRuleForm.status,
+          color: nodeStatusRuleForm.color
+        }
+      }
+    ]
+  });
+}
+
+function updateButtonDefaultVisible(value: boolean) {
+  if (!props.selectedNode || !isSelectedControlNode.value) return;
+  updateSelectedNodeProps({ buttonDefaultVisible: value });
+}
+
+function addButtonVisibilityRule() {
+  if (!props.selectedNode || !isSelectedControlNode.value) return;
+  const ruleField = effectiveButtonVisibilityRuleField();
+  if (!ruleField) return;
+  if (buttonVisibilityRuleForm.sourceType === "node" && !buttonVisibilityRuleForm.nodeKey) return;
+
+  const value = normalizeButtonVisibilityRuleValue(buttonVisibilityRuleForm.value);
+  const field = buttonVisibilityRuleForm.sourceType === "metaData"
+    ? normalizeExpressionPath(ruleField)
+    : expressionFieldWithSource(
+      selectedButtonRuleNode.value,
+      ruleField,
+      buttonVisibilityRuleForm.sourceId || defaultRuleSourceId(selectedButtonRuleNode.value)
+    );
+  const actionLabel = buttonVisibilityRuleForm.visible ? "显示" : "隐藏";
+  const sourceLabel = buttonVisibilityRuleForm.sourceType === "metaData"
+    ? "父组件数据"
+    : selectedButtonRuleNode.value?.label ?? buttonVisibilityRuleForm.nodeKey;
+
+  emit("updateNode", props.selectedNode.key, {
+    displayRules: [
+      ...(props.selectedNode.displayRules ?? []),
+      {
+        id: createRuleId("rule_button_visibility"),
+        name: `${sourceLabel}.${ruleField} = ${String(value)} 时按钮${actionLabel}`,
+        priority: Number.isFinite(buttonVisibilityRuleForm.priority) ? Math.round(buttonVisibilityRuleForm.priority) : 10,
+        condition: {
+          logic: "and",
+          conditions: [
+            {
+              field,
+              operator: "eq",
+              value
+            }
+          ]
+        },
+        action: {
+          visible: buttonVisibilityRuleForm.visible
+        }
+      }
+    ]
+  });
+}
+
+function addRunningStateRule() {
+  const ruleField = effectiveRunningRuleField();
+  if (!props.selectedLink || !runningRuleForm.nodeKey || !ruleField) return;
+  const sourceNode = selectedRuleNode.value;
+  const value = normalizeRuleValue(runningRuleForm.value);
+  const sourceId = runningRuleForm.sourceId || defaultRuleSourceId(sourceNode);
+  const field = expressionFieldWithSource(sourceNode, ruleField, sourceId);
+  const lineStateLabel = linkStateOptions.find((item) => item.value === runningRuleForm.lineState)?.label ?? runningRuleForm.lineState;
+  addLinkRule({
+    id: createRuleId("rule_link_running"),
+    name: `${sourceNode?.label ?? runningRuleForm.nodeKey}.${ruleField} = ${String(value)} 时线路${lineStateLabel}`,
+    priority: Number.isFinite(runningRuleForm.priority) ? Math.round(runningRuleForm.priority) : 10,
+    trigger: {
+      type: "dataChange",
+      sources: [field]
+    },
+    condition: {
+      logic: "and",
+      conditions: [
+        {
+          field,
+          operator: "eq",
+          value
+        }
+      ]
+    },
+    action: {
+      state: runningRuleForm.lineState,
+      style: {
+        color: runningRuleForm.color,
+        width: Math.max(1, Math.round(Number(runningRuleForm.width) || 3)),
+        animated: runningRuleForm.lineState === "running",
+        flowDirection: runningRuleForm.flowDirection
+      }
+    }
+  });
+}
+
+function addBreakerRunningRule() {
+  if (!props.selectedLink) return;
+  const sourceNode = chooseBreakerRuleNode();
+  const fieldName = chooseBoundField(sourceNode, ["state", "breakerState"], "state");
+  const field = `${sourceNode?.key ?? props.selectedLink.from}.${fieldName}`;
+  addLinkRule({
+    id: createRuleId("rule_link_running"),
+    name: "断路器闭合时线路运行",
+    priority: 10,
+    trigger: {
+      type: "dataChange",
+      sources: [field]
+    },
+    condition: {
+      logic: "and",
+      conditions: [
+        {
+          field,
+          operator: "eq",
+          value: "closed"
+        }
+      ]
+    },
+    action: {
+      state: "running",
+      style: {
+        color: "#22c55e",
+        width: 3,
+        animated: true,
+        flowDirection: "fromTo"
+      }
+    }
+  });
+}
+
+function addVoltageFaultRule() {
+  if (!props.selectedLink) return;
+  const sourceNode = chooseVoltageRuleNode();
+  const fieldName = chooseBoundField(sourceNode, ["outputVoltage", "voltage", "U"], "outputVoltage");
+  const field = `${sourceNode?.key ?? props.selectedLink.to}.${fieldName}`;
+  addLinkRule({
+    id: createRuleId("rule_voltage_fault"),
+    name: "输出电压异常",
+    priority: 100,
+    trigger: {
+      type: "dataChange",
+      sources: [field]
+    },
+    condition: {
+      logic: "and",
+      conditions: [
+        {
+          field,
+          operator: "lt",
+          value: 0
+        }
+      ]
+    },
+    action: {
+      state: "fault",
+      style: {
+        color: "#ef4444",
+        width: 4,
+        animated: false
+      }
+    }
+  });
+}
+
+function removeLinkRule(ruleId: string) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, {
+    rules: (props.selectedLink.rules ?? []).filter((rule) => rule.id !== ruleId)
+  });
+}
+
+function removeNodeDisplayRule(ruleId: string) {
+  if (!props.selectedNode) return;
+  emit("updateNode", props.selectedNode.key, {
+    displayRules: (props.selectedNode.displayRules ?? []).filter((rule) => rule.id !== ruleId)
+  });
+}
+
+function describeRule(rule: LinkRuntimeRule) {
+  const condition = rule.condition.conditions[0];
+  if (!condition || "conditions" in condition) return "复合条件";
+  return `${condition.field} ${condition.operator} ${condition.value === undefined ? "" : String(condition.value)}`;
+}
+
+function describeDisplayRule(rule: NonNullable<TopologyNode["displayRules"]>[number]) {
+  const condition = rule.condition.conditions[0];
+  if (!condition || "conditions" in condition) return "复合条件";
+  return `${condition.field} ${condition.operator} ${condition.value === undefined ? "" : String(condition.value)}`;
+}
+
+watch(
+  () => props.selectedNode?.key,
+  () => {
+    if (!props.selectedNode || activeRuleNodeKey === props.selectedNode.key) return;
+    activeRuleNodeKey = props.selectedNode.key;
+    resetNodeEventForm(props.selectedNode);
+    ensureRuleSourceSelection();
+    updateNodeStatusRuleField(selectedNodeFieldOptions.value.some((field) => field.field === "status") ? "status" : selectedNodeFieldOptions.value[0]?.field ?? "status");
+    if (!buttonVisibilityRuleForm.nodeKey || !props.topology?.nodes.some((node) => node.key === buttonVisibilityRuleForm.nodeKey)) {
+      updateButtonVisibilityRuleNode(props.topology?.nodes.find((node) => node.key !== props.selectedNode?.key)?.key ?? props.topology?.nodes[0]?.key ?? "");
+    }
+  },
+  { immediate: true }
+);
+
+watch(
+  () => [props.selectedLink?.key, props.topology?.nodes.map((node) => node.key).join("|")],
+  () => {
+    if (!props.selectedLink) return;
+    const preferredNodeKey = props.selectedLink.from || props.topology?.nodes[0]?.key || "";
+    const linkChanged = activeRuleLinkKey !== props.selectedLink.key;
+    activeRuleLinkKey = props.selectedLink.key;
+    const nextNodeKey = !linkChanged && props.topology?.nodes.some((node) => node.key === runningRuleForm.nodeKey)
+      ? runningRuleForm.nodeKey
+      : preferredNodeKey;
+    updateRunningRuleNode(nextNodeKey);
+    ensureRuleSourceSelection();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => props.topology?.dataSources?.map((source) => `${source.sourceId}:${source.enabled !== false}`).join("|"),
+  ensureRuleSourceSelection,
+  { immediate: true }
+);
+</script>
+
+<template>
+  <aside class="property">
+    <div class="panel-header">属性面板</div>
+    <div v-if="topology" class="property-body">
+      <section class="property-section object-tree-section">
+        <div class="section-title">对象树</div>
+        <div class="tree-block">
+          <div class="tree-heading">
+            <span>节点</span>
+            <span>{{ topology.nodes.length }}</span>
+          </div>
+          <button
+            v-for="row in nodeTreeRows"
+            :key="row.node.key"
+            type="button"
+            class="tree-item"
+            :class="{ active: activeKey === row.node.key }"
+            :style="{ paddingLeft: `${8 + row.level * 16}px` }"
+            @click="selectItem(row.node.key)"
+          >
+            <span class="tree-kind">{{ nodeTreeTypeLabel(row.node) }}</span>
+            <span class="tree-name">{{ row.node.label }}</span>
+            <span class="tree-key">{{ row.node.key }}</span>
+          </button>
+          <div v-if="!topology.nodes.length" class="tree-empty">暂无节点</div>
+        </div>
+
+        <div class="tree-block">
+          <div class="tree-heading">
+            <span>连线</span>
+            <span>{{ topology.links.length }}</span>
+          </div>
+          <button
+            v-for="link in topology.links"
+            :key="link.key"
+            type="button"
+            class="tree-item"
+            :class="{ active: activeKey === link.key }"
+            @click="selectItem(link.key)"
+          >
+            <span class="tree-kind">线</span>
+            <span class="tree-name">{{ linkTreeLabel(link) }}</span>
+            <span class="tree-key">{{ link.key }}</span>
+          </button>
+          <div v-if="!topology.links.length" class="tree-empty">暂无连线</div>
+        </div>
+      </section>
+
+      <template v-if="selectedNode">
+        <section class="property-section">
+          <div class="section-title">{{ selectedNode.isGroup ? "组属性" : "节点属性" }}</div>
+          <label>
+            名称
+            <input
+              :value="selectedNode.label"
+              @input="updateLabel(($event.target as HTMLInputElement).value)"
+              @change="updateLabel(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            标识
+            <input
+              :value="nodeIdentifier(selectedNode)"
+              placeholder="例如 qf1"
+              @input="updateIdentifier(($event.target as HTMLInputElement).value)"
+              @change="updateIdentifier(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            内部 Key
+            <input :value="selectedNode.key" readonly />
+          </label>
+          <label>
+            类型
+            <input :value="selectedNode.typeId" readonly />
+          </label>
+          <label>
+            所属组
+            <select
+              :value="selectedNode.group ?? ''"
+              @change="updateNodeGroup(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">无</option>
+              <option v-for="group in availableParentGroups" :key="group.key" :value="group.key">
+                {{ group.label }}（{{ group.key }}）
+              </option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedNode.props?.showLabel !== false"
+              @change="updateShowLabel(($event.target as HTMLInputElement).checked)"
+            />
+            展示名称
+          </label>
+        </section>
+
+        <section v-if="isSelectedAnnotationNode" class="property-section">
+          <div class="section-title">标注文本</div>
+          <label>
+            文本模板
+            <textarea
+              :value="nodeTextTemplate(selectedNode)"
+              rows="4"
+              placeholder="例如 Ia: ${ct1.ia} A；多接口可写 ${latest.data.ct1.ia}"
+              spellcheck="false"
+              @input="updateAnnotationTextTemplate(($event.target as HTMLTextAreaElement).value)"
+              @change="updateAnnotationTextTemplate(($event.target as HTMLTextAreaElement).value)"
+            />
+          </label>
+          <label>
+            文字颜色
+            <input
+              type="color"
+              :value="nodeTextColor(selectedNode)"
+              @input="updateAnnotationTextColor(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            文字大小
+            <input
+              type="number"
+              min="1"
+              step="1"
+              :value="nodeTextSize(selectedNode)"
+              @input="updateAnnotationTextSize(($event.target as HTMLInputElement).value)"
+              @change="updateAnnotationTextSize(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+        </section>
+
+        <section v-if="isSelectedControlNode" class="property-section">
+          <div class="section-title">按钮配置</div>
+          <label>
+            按钮文字
+            <input
+              :value="buttonText(selectedNode)"
+              placeholder="例如 分闸 / 合闸 / 查看详情"
+              @input="updateButtonText(($event.target as HTMLInputElement).value)"
+              @change="updateButtonText(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            渲染方式
+            <select
+              :value="buttonRenderMode(selectedNode)"
+              @change="updateButtonRenderMode(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="text">文字</option>
+              <option value="image">图片</option>
+              <option value="imageText">图片 + 文字</option>
+            </select>
+          </label>
+          <label>
+            图片
+            <input
+              :value="buttonImage(selectedNode)"
+              placeholder="图片地址或上传图片"
+              @input="updateButtonImage(($event.target as HTMLInputElement).value)"
+              @change="updateButtonImage(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <div class="layer-actions">
+            <button type="button" :disabled="uploadingButtonImage" @click="chooseButtonImage">
+              {{ uploadingButtonImage ? "上传中" : "上传图片" }}
+            </button>
+            <button type="button" :disabled="!buttonImage(selectedNode)" @click="updateButtonImage('')">清空图片</button>
+          </div>
+          <input
+            ref="buttonImageInputRef"
+            class="hidden-file-input"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,.svg"
+            @change="handleButtonImageChange"
+          />
+          <div class="section-subtitle">显示隐藏规则</div>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedNode.props?.buttonDefaultVisible !== false"
+              @change="updateButtonDefaultVisible(($event.target as HTMLInputElement).checked)"
+            />
+            默认显示
+          </label>
+          <div class="rule-builder compact-rule-builder">
+            <label>
+              条件来源
+              <select v-model="buttonVisibilityRuleForm.sourceType">
+                <option value="metaData">父组件数据 mateData/metaData</option>
+                <option value="node">绑定设备节点</option>
+              </select>
+            </label>
+            <template v-if="buttonVisibilityRuleForm.sourceType === 'metaData'">
+              <label>
+                字段
+                <input v-model="buttonVisibilityRuleForm.metaField" placeholder="例如 qfStatus.button1 / ${mateData.qfStatus.button1}" />
+              </label>
+            </template>
+            <template v-else>
+              <label>
+                条件节点
+                <select
+                  :value="buttonVisibilityRuleForm.nodeKey"
+                  @change="updateButtonVisibilityRuleNode(($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="">请选择节点</option>
+                  <option v-for="node in topology.nodes" :key="node.key" :value="node.key">
+                    {{ node.label }}（{{ node.key }}）
+                  </option>
+                </select>
+              </label>
+              <label v-if="showRuleSourceSelect">
+                接口
+                <select v-model="buttonVisibilityRuleForm.sourceId">
+                  <option v-for="source in ruleDataSources" :key="source.sourceId" :value="source.sourceId">
+                    {{ source.name || source.sourceId }}（{{ source.sourceId }}）
+                  </option>
+                </select>
+              </label>
+              <label>
+                字段
+                <select
+                  :value="buttonVisibilityRuleForm.field"
+                  @change="updateButtonVisibilityRuleField(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="field in selectedButtonRuleNodeFieldOptions" :key="field.field" :value="field.field">
+                    {{ field.label }}（{{ field.field }}）
+                  </option>
+                  <option value="__custom__">自定义字段</option>
+                </select>
+              </label>
+              <label v-if="buttonVisibilityRuleForm.field === '__custom__'">
+                字段名
+                <input v-model="buttonVisibilityRuleForm.customField" placeholder="例如 status / ${latest.data.qf1.status}" />
+              </label>
+            </template>
+            <label>
+              等于
+              <select
+                v-if="buttonVisibilityRuleForm.sourceType === 'node' && selectedButtonRuleFieldOption()?.options?.length"
+                v-model="buttonVisibilityRuleForm.value"
+              >
+                <option
+                  v-for="option in selectedButtonRuleFieldOption()?.options"
+                  :key="String(option)"
+                  :value="String(option)"
+                >
+                  {{ String(option) }}
+                </option>
+              </select>
+              <select
+                v-else-if="buttonVisibilityRuleForm.sourceType === 'node' && selectedButtonRuleFieldOption()?.type === 'boolean'"
+                v-model="buttonVisibilityRuleForm.value"
+              >
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <input v-else v-model="buttonVisibilityRuleForm.value" placeholder="例如 show / closed" />
+            </label>
+            <div class="size-grid">
+              <label>
+                命中动作
+                <select v-model="buttonVisibilityRuleForm.visible">
+                  <option :value="true">显示</option>
+                  <option :value="false">隐藏</option>
+                </select>
+              </label>
+              <label>
+                优先级
+                <input v-model.number="buttonVisibilityRuleForm.priority" type="number" />
+              </label>
+            </div>
+            <button type="button" @click="addButtonVisibilityRule">添加按钮显示规则</button>
+          </div>
+        </section>
+
+        <section class="property-section">
+          <div class="section-title">{{ selectedNode.isGroup ? "尺寸" : "尺寸与旋转" }}</div>
+          <div class="size-grid">
+            <label>
+              宽度
+              <input
+                type="number"
+                :value="parseSize(selectedNode.size).width"
+                @input="updateSize('width', ($event.target as HTMLInputElement).value)"
+                @change="updateSize('width', ($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <label>
+              高度
+              <input
+                type="number"
+                :value="parseSize(selectedNode.size).height"
+                @input="updateSize('height', ($event.target as HTMLInputElement).value)"
+                @change="updateSize('height', ($event.target as HTMLInputElement).value)"
+              />
+            </label>
+          </div>
+          <label v-if="!selectedNode.isGroup">
+            旋转角度
+            <input
+              type="number"
+              step="1"
+              :value="selectedNode.angle ?? 0"
+              @input="updateAngle(($event.target as HTMLInputElement).value)"
+              @change="updateAngle(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            层级
+            <input :value="nodeZOrder(selectedNode)" readonly />
+          </label>
+          <div class="layer-actions">
+            <button type="button" @click="moveSelectedToBottom">置底</button>
+            <button type="button" @click="moveSelectedLayer('down')">下移一层</button>
+            <button type="button" @click="moveSelectedLayer('up')">上移一层</button>
+            <button type="button" @click="moveSelectedToTop">置顶</button>
+          </div>
+        </section>
+
+        <section class="property-section">
+          <div class="section-title">节点事件</div>
+          <div class="rule-builder">
+            <label class="checkbox-row">
+              <input v-model="nodeEventForm.enabled" type="checkbox" />
+              启用事件
+            </label>
+            <div class="size-grid">
+              <label>
+                触发方式
+                <select v-model="nodeEventForm.trigger">
+                  <option value="click">click</option>
+                  <option value="doubleClick">doubleClick</option>
+                  <option value="contextMenu">contextMenu</option>
+                </select>
+              </label>
+              <label>
+                EVENT key
+                <input v-model="nodeEventForm.eventKey" placeholder="例如 qf1-open" />
+              </label>
+            </div>
+            <label>
+              EVENT name
+              <input v-model="nodeEventForm.eventName" placeholder="例如 deviceClick / openBreaker" />
+            </label>
+            <label>
+              绑定节点
+              <select v-model="nodeEventForm.bindNodeKey">
+                <option value="">不绑定</option>
+                <option v-for="node in topology.nodes" :key="node.key" :value="node.key">
+                  {{ node.label }}（{{ node.key }}）
+                </option>
+              </select>
+            </label>
+            <label>
+              绑定数据路径
+              <input v-model="nodeEventForm.bindDataPath" placeholder="例如 runtime / props / latest.data.qf1" />
+            </label>
+            <label>
+              手写 event data JSON
+              <textarea v-model="nodeEventForm.eventDataText" rows="4" spellcheck="false" />
+            </label>
+            <label>
+              event data 模板 JSON
+              <textarea
+                v-model="nodeEventForm.eventDataTemplateText"
+                rows="4"
+                placeholder="{ &quot;status&quot;: &quot;${latest.data.qf1.status}&quot; }"
+                spellcheck="false"
+              />
+            </label>
+            <button type="button" @click="addNodeEventConfig">添加节点事件</button>
+          </div>
+          <div v-if="selectedNode.eventConfig?.length" class="rule-list">
+            <div v-for="(event, index) in selectedNode.eventConfig" :key="event.id ?? index" class="rule-item">
+              <div>
+                <strong>{{ event.eventName }}</strong>
+                <span>{{ describeNodeEventConfig(event) }}</span>
+                <span v-if="event.bindNodeKey">绑定 {{ event.bindNodeKey }}{{ event.bindDataPath ? ` / ${event.bindDataPath}` : '' }}</span>
+              </div>
+              <button type="button" @click="removeNodeEventConfig(event.id, index)">删除</button>
+            </div>
+          </div>
+          <div v-else class="hint">暂无节点事件。</div>
+        </section>
+
+        <section v-if="selectedNode.isGroup" class="property-section">
+          <div class="section-title">组样式</div>
+          <label>
+            背景
+            <input
+              type="color"
+              :value="selectedNode.runtime?.backgroundColor ?? '#eef6ff'"
+              @input="updateRuntimeColor('backgroundColor', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            背景透明度（%）
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              :value="groupBackgroundOpacity(selectedNode)"
+              @input="updateBackgroundOpacity(($event.target as HTMLInputElement).value)"
+              @change="updateBackgroundOpacity(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            边框
+            <input
+              type="color"
+              :value="selectedNode.runtime?.borderColor ?? '#3b82f6'"
+              @input="updateRuntimeColor('borderColor', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedNode.props?.transparentBackground === true"
+              @change="updateTransparentBackground(($event.target as HTMLInputElement).checked)"
+            />
+            透明背景
+          </label>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedNode.props?.dashedBorder === true"
+              @change="updateDashedBorder(($event.target as HTMLInputElement).checked)"
+            />
+            虚线边框
+          </label>
+        </section>
+
+        <section class="property-section">
+          <div class="section-title">节点运行规则</div>
+          <div class="rule-builder">
+            <label v-if="showRuleSourceSelect">
+              接口
+              <select v-model="nodeStatusRuleForm.sourceId">
+                <option v-for="source in ruleDataSources" :key="source.sourceId" :value="source.sourceId">
+                  {{ source.name || source.sourceId }}（{{ source.sourceId }}）
+                </option>
+              </select>
+            </label>
+            <label>
+              数据字段
+              <select
+                :value="nodeStatusRuleForm.field"
+                @change="updateNodeStatusRuleField(($event.target as HTMLSelectElement).value)"
+              >
+                <option v-for="field in selectedNodeFieldOptions" :key="field.field" :value="field.field">
+                  {{ field.label }}（{{ field.field }}）
+                </option>
+                <option value="__custom__">自定义字段</option>
+              </select>
+            </label>
+            <label v-if="nodeStatusRuleForm.field === '__custom__'">
+              字段名
+              <input v-model="nodeStatusRuleForm.customField" placeholder="例如 status / data.qf1.status / ${api1.data.qf1.status}" />
+            </label>
+            <label>
+              等于
+              <select v-if="selectedNodeRuleFieldOption()?.options?.length" v-model="nodeStatusRuleForm.value">
+                <option
+                  v-for="option in selectedNodeRuleFieldOption()?.options"
+                  :key="String(option)"
+                  :value="String(option)"
+                >
+                  {{ String(option) }}
+                </option>
+              </select>
+              <select v-else-if="selectedNodeRuleFieldOption()?.type === 'boolean'" v-model="nodeStatusRuleForm.value">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <input v-else v-model="nodeStatusRuleForm.value" placeholder="例如 normal / warning / fault" />
+            </label>
+            <div class="size-grid">
+              <label>
+                设置状态
+                <select
+                  :value="nodeStatusRuleForm.status"
+                  @change="updateNodeRuleStatus(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="status in selectedNodeStatusOptions" :key="status.value" :value="status.value">
+                    {{ status.label }}{{ status.image ? '（已配置图片）' : '' }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                状态颜色
+                <input v-model="nodeStatusRuleForm.color" type="color" />
+              </label>
+            </div>
+            <div class="status-preview-row">
+              <span class="status-preview-label">展示状态</span>
+              <span class="status-preview-chip" :style="{ borderColor: selectedNodeStatusOption?.color }">
+                <img
+                  v-if="selectedNodeStatusOption?.image && isImageIcon(selectedNodeStatusOption.image)"
+                  :src="selectedNodeStatusOption.image"
+                  :alt="selectedNodeStatusOption.label"
+                />
+                <span v-else class="status-preview-color" :style="{ background: selectedNodeStatusOption?.color }" />
+                <span>{{ selectedNodeStatusOption?.label }}</span>
+              </span>
+            </div>
+            <label>
+              优先级
+              <input v-model.number="nodeStatusRuleForm.priority" type="number" />
+            </label>
+            <button type="button" @click="addNodeStatusRule">添加节点状态规则</button>
+          </div>
+          <div v-if="selectedNode.displayRules?.length" class="rule-list">
+            <div v-for="rule in selectedNode.displayRules" :key="rule.id" class="rule-item">
+              <div>
+                <strong>{{ rule.name }}</strong>
+                <span>优先级 {{ rule.priority }}</span>
+                <span>{{ describeDisplayRule(rule) }}</span>
+              </div>
+              <button type="button" @click="removeNodeDisplayRule(rule.id)">删除</button>
+            </div>
+          </div>
+          <div v-else class="hint">暂无节点运行规则。</div>
+        </section>
+      </template>
+
+      <template v-else-if="selectedLink">
+        <section class="property-section">
+          <div class="section-title">连线属性</div>
+          <label>
+            名称
+            <input
+              :value="selectedLink.label ?? ''"
+              placeholder="连线名称"
+              @input="updateLinkLabel(($event.target as HTMLInputElement).value)"
+              @change="updateLinkLabel(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            标识
+            <input :value="selectedLink.key" readonly />
+          </label>
+          <label>
+            起点
+            <input :value="`${selectedLink.from}${selectedLink.fromPort ? ` / ${selectedLink.fromPort}` : ''}`" readonly />
+          </label>
+          <label>
+            终点
+            <input :value="`${selectedLink.to}${selectedLink.toPort ? ` / ${selectedLink.toPort}` : ''}`" readonly />
+          </label>
+        </section>
+
+        <section class="property-section">
+          <div class="section-title">方向与箭头</div>
+          <label>
+            连线方向
+            <select
+              :value="selectedLink.direction ?? 'forward'"
+              @change="updateLinkDirection(($event.target as HTMLSelectElement).value as TopologyLink['direction'])"
+            >
+              <option value="forward">正向</option>
+              <option value="reverse">反向</option>
+              <option value="both">双向</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedLink.showArrow !== false"
+              @change="updateLinkArrow(($event.target as HTMLInputElement).checked)"
+            />
+            显示箭头
+          </label>
+        </section>
+
+        <section class="property-section">
+          <div class="section-title">默认样式</div>
+          <label>
+            颜色
+            <input
+              type="color"
+              :value="selectedLink.defaultStyle?.color ?? '#42B0FF'"
+              @input="updateLinkDefaultStyle('color', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            宽度
+            <input
+              type="number"
+              :value="selectedLink.defaultStyle?.width ?? 2"
+              @input="updateLinkDefaultStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
+              @change="updateLinkDefaultStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
+            />
+          </label>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedLink.defaultStyle?.animated ?? false"
+              @change="updateLinkDefaultStyle('animated', ($event.target as HTMLInputElement).checked)"
+            />
+            是否流线
+          </label>
+          <label>
+            流向
+            <select
+              :value="selectedLink.defaultStyle?.flowDirection ?? 'fromTo'"
+              @change="updateLinkFlowDirection(($event.target as HTMLSelectElement).value as LinkStyle['flowDirection'])"
+            >
+              <option value="fromTo">正向</option>
+              <option value="toFrom">反向</option>
+              <option value="both">双向</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="property-section">
+          <div class="section-title">运行规则</div>
+          <div class="rule-builder">
+            <label>
+              条件节点
+              <select
+                :value="runningRuleForm.nodeKey"
+                @change="updateRunningRuleNode(($event.target as HTMLSelectElement).value)"
+              >
+                <option v-for="node in availableRuleNodes" :key="node.key" :value="node.key">
+                  {{ node.label }}（{{ node.key }}）
+                </option>
+              </select>
+            </label>
+            <label v-if="showRuleSourceSelect">
+              接口
+              <select v-model="runningRuleForm.sourceId">
+                <option v-for="source in ruleDataSources" :key="source.sourceId" :value="source.sourceId">
+                  {{ source.name || source.sourceId }}（{{ source.sourceId }}）
+                </option>
+              </select>
+            </label>
+            <label>
+              状态字段
+              <select v-model="runningRuleForm.field">
+                <option v-for="field in selectedRuleNodeFieldOptions" :key="field.field" :value="field.field">
+                  {{ field.label }}（{{ field.field }}）
+                </option>
+                <option value="__custom__">自定义字段</option>
+              </select>
+            </label>
+            <label v-if="runningRuleForm.field === '__custom__'">
+              字段名
+              <input v-model="runningRuleForm.customField" placeholder="例如 status / data.qf1.status / ${api1.data.qf1.status}" />
+            </label>
+            <label>
+              等于
+              <select v-if="selectedRuleFieldOption()?.options?.length" v-model="runningRuleForm.value">
+                <option
+                  v-for="option in selectedRuleFieldOption()?.options"
+                  :key="String(option)"
+                  :value="String(option)"
+                >
+                  {{ String(option) }}
+                </option>
+              </select>
+              <select v-else-if="selectedRuleFieldOption()?.type === 'boolean'" v-model="runningRuleForm.value">
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <input v-else v-model="runningRuleForm.value" placeholder="例如 closed / 1 / true" />
+            </label>
+            <div class="size-grid">
+              <label>
+                连线状态
+                <select
+                  :value="runningRuleForm.lineState"
+                  @change="updateLinkRuleStateFromValue(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="state in linkStateOptions" :key="state.value" :value="state.value">
+                    {{ state.label }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                优先级
+                <input v-model.number="runningRuleForm.priority" type="number" />
+              </label>
+            </div>
+            <div class="size-grid">
+              <label>
+                运行线宽
+                <input v-model.number="runningRuleForm.width" type="number" />
+              </label>
+              <label>
+                状态颜色
+                <input v-model="runningRuleForm.color" type="color" />
+              </label>
+            </div>
+            <div class="size-grid">
+              <label>
+                流向
+                <select v-model="runningRuleForm.flowDirection">
+                  <option value="fromTo">正向</option>
+                  <option value="toFrom">反向</option>
+                  <option value="both">双向</option>
+                </select>
+              </label>
+            </div>
+            <button type="button" @click="addRunningStateRule">添加运行态规则</button>
+          </div>
+          <div class="rule-actions">
+            <button type="button" @click="addBreakerRunningRule">快捷：断路器闭合运行</button>
+            <button type="button" @click="addVoltageFaultRule">快捷：电压故障</button>
+          </div>
+          <div v-if="selectedLink.rules?.length" class="rule-list">
+            <div v-for="rule in selectedLink.rules" :key="rule.id" class="rule-item">
+              <div>
+                <strong>{{ rule.name }}</strong>
+                <span>优先级 {{ rule.priority }}</span>
+                <span>{{ describeRule(rule) }}</span>
+              </div>
+              <button type="button" @click="removeLinkRule(rule.id)">删除</button>
+            </div>
+          </div>
+          <div v-else class="hint">暂无运行规则。</div>
+        </section>
+      </template>
+
+      <template v-else>
+        <label>
+          拓扑名称
+          <input :value="topology.name" readonly />
+        </label>
+        <label>
+          版本
+          <input :value="topology.version" readonly />
+        </label>
+        <label>
+          节点数量
+          <input :value="topology.nodes.length" readonly />
+        </label>
+        <label>
+          连线数量
+          <input :value="topology.links.length" readonly />
+        </label>
+        <div class="hint">
+          选中画布中的节点、组或连线后，可在这里编辑尺寸、组样式、连线方向和箭头。
+        </div>
+      </template>
+      </div>
+  </aside>
+</template>
+
+<style scoped>
+.property {
+  height: 100%;
+}
+
+.property-body {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.property-section {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.property-section:last-child {
+  border-bottom: 0;
+}
+
+.object-tree-section {
+  gap: 10px;
+}
+
+.tree-block {
+  display: grid;
+  gap: 4px;
+}
+
+.tree-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tree-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 6px 8px;
+  color: #334155;
+  text-align: left;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.tree-item.active {
+  color: #0f172a;
+  background: #e0f2fe;
+  border-color: #38bdf8;
+}
+
+.tree-kind {
+  min-width: 28px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.tree-name,
+.tree-key {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tree-name {
+  font-weight: 600;
+}
+
+.tree-key {
+  max-width: 76px;
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.tree-empty {
+  padding: 6px 8px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.section-title {
+  color: #111827;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.size-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.layer-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+input,
+textarea {
+  width: 100%;
+  padding: 8px;
+  color: #111827;
+  background: #f9fafb;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+}
+
+textarea {
+  min-height: 72px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+select {
+  width: 100%;
+  padding: 8px;
+  color: #111827;
+  background: #f9fafb;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+}
+
+input[type="color"] {
+  height: 36px;
+  padding: 4px;
+}
+
+button {
+  padding: 7px 10px;
+  color: #155e75;
+  background: #ecfeff;
+  border: 1px solid #a5f3fc;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #cffafe;
+}
+
+button.tree-item {
+  color: #334155;
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+button.tree-item:hover {
+  background: #eef6ff;
+}
+
+button.tree-item.active {
+  color: #0f172a;
+  background: #e0f2fe;
+  border-color: #38bdf8;
+}
+
+.checkbox-row {
+  grid-template-columns: 16px 1fr;
+  align-items: center;
+}
+
+.checkbox-row input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.rule-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.rule-builder {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.section-subtitle {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.compact-rule-builder {
+  margin-top: 8px;
+}
+
+.status-preview-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.status-preview-label {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.status-preview-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  padding: 4px 8px;
+  color: #111827;
+  border: 1px solid #d8dde6;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.status-preview-chip img,
+.status-preview-color {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+}
+
+.status-preview-chip img {
+  object-fit: contain;
+}
+
+.rule-list {
+  display: grid;
+  gap: 8px;
+}
+
+.rule-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.rule-item strong,
+.rule-item span {
+  display: block;
+}
+
+.rule-item strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.rule-item span {
+  margin-top: 2px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.hint {
+  padding: 10px;
+  color: #4b5563;
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+</style>
