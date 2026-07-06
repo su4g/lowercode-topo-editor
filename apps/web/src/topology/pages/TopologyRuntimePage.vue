@@ -484,17 +484,25 @@ function buildDefaultLinkRuntime(link: TopologyLink): LinkRuntime {
     state: link.defaultState ?? "off",
     color: link.defaultStyle?.color ?? "#42B0FF",
     width: link.defaultStyle?.width ?? 2,
+    opacity: link.defaultStyle?.opacity ?? 1,
+    lineCap: link.defaultStyle?.lineCap ?? "butt",
     animated: link.defaultStyle?.animated ?? false,
     flowDirection: link.defaultStyle?.flowDirection ?? "fromTo",
+    dash: link.defaultStyle?.dash,
+    flow: link.defaultStyle?.flow,
+    glow: link.defaultStyle?.glow,
     visibility: link.runtime?.visibility
   };
 }
 
 function applyLinkRule(runtime: LinkRuntime, rule: LinkRuntimeRule): LinkRuntime {
+  const style = rule.action.style;
   return {
     ...runtime,
     state: rule.action.state ?? runtime.state,
-    ...rule.action.style
+    ...style,
+    flow: style?.flow ? { ...(runtime.flow ?? {}), ...style.flow } : runtime.flow,
+    glow: style?.glow ? { ...(runtime.glow ?? {}), ...style.glow } : runtime.glow
   };
 }
 

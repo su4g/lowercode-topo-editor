@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { normalizeExpressionPath, type BindableFieldDefinition, type LinkRuntimeRule, type LinkStyle, type NodeStatusKey, type NodeTypeDefinition, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { normalizeExpressionPath, type BindableFieldDefinition, type LinkRuntimeRule, type LinkStyle, type NodeLabelPosition, type NodeStatusKey, type NodeTypeDefinition, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { ElMessage } from "element-plus";
 import { computed, reactive, ref, watch } from "vue";
 import { uploadImageAsset } from "../../services/assetApi";
@@ -15,6 +15,8 @@ const emit = defineEmits<{
   updateNode: [key: string, patch: Partial<TopologyNode>];
   updateLink: [key: string, patch: Partial<TopologyLink>];
   selectItem: [key: string];
+  previewLinkStyle: [key: string, style: LinkStyle];
+  clearLinkStylePreview: [key?: string];
 }>();
 
 type RuleFieldOption = {
@@ -37,11 +39,32 @@ const runningRuleForm = reactive({
   value: "closed",
   lineState: "off" as NonNullable<LinkRuntimeRule["action"]["state"]>,
   priority: 10,
+  overrideMainStyle: true,
   color: "#42B0FF",
   width: 3,
-  flowDirection: "fromTo" as LinkStyle["flowDirection"]
+  opacity: 1,
+  lineCap: "butt" as NonNullable<LinkStyle["lineCap"]>,
+  dash: undefined as number[] | undefined,
+  overrideFlowStyle: true,
+  animated: false,
+  flowDirection: "fromTo" as LinkStyle["flowDirection"],
+  flowColor: "#ffffff",
+  flowWidth: 3,
+  flowOpacity: 0.85,
+  flowDash: [9, 9] as number[] | undefined,
+  flowSpeed: 4
 });
 let activeRuleLinkKey = "";
+const activeLinkPreview = ref<{ linkKey: string; source: "form" | "rule"; ruleId?: string } | null>(null);
+
+const linkDashPresets = [
+  { label: "实线", value: "solid", dash: undefined },
+  { label: "短虚线", value: "short-dashed", dash: [9, 9] },
+  { label: "长虚线", value: "long-dashed", dash: [16, 10] },
+  { label: "点线", value: "dotted", dash: [2, 6] },
+  { label: "点划线", value: "dashdot", dash: [12, 6, 2, 6] },
+  { label: "自定义", value: "custom", dash: undefined }
+] as const;
 
 const nodeStatusRuleForm = reactive({
   sourceId: "",
@@ -90,6 +113,13 @@ const linkStateOptions: Array<{ label: string; value: NonNullable<LinkRuntimeRul
   { label: "告警", value: "warning", color: "#f59e0b" },
   { label: "故障", value: "fault", color: "#ef4444" },
   { label: "离线", value: "offline", color: "#64748b" }
+];
+
+const nodeLabelPositionOptions: Array<{ label: string; value: NodeLabelPosition }> = [
+  { label: "上", value: "top" },
+  { label: "右", value: "right" },
+  { label: "下", value: "bottom" },
+  { label: "左", value: "left" }
 ];
 const buttonImageInputRef = ref<HTMLInputElement | null>(null);
 const uploadingButtonImage = ref(false);
@@ -215,6 +245,15 @@ async function handleButtonImageChange(event: Event) {
 
 function updateShowLabel(value: boolean) {
   updateSelectedNodeProps({ showLabel: value });
+}
+
+function nodeLabelPosition(node: TopologyNode): NodeLabelPosition {
+  return node.labelPosition ?? "bottom";
+}
+
+function updateLabelPosition(value: string) {
+  if (!props.selectedNode || !nodeLabelPositionOptions.some((option) => option.value === value)) return;
+  emit("updateNode", props.selectedNode.key, { labelPosition: value as NodeLabelPosition });
 }
 
 function updateTransparentBackground(value: boolean) {
@@ -383,7 +422,7 @@ function updateLinkArrow(value: boolean) {
   emit("updateLink", props.selectedLink.key, { showArrow: value });
 }
 
-function updateLinkDefaultStyle(field: keyof LinkStyle, value: string | number | boolean) {
+function updateLinkDefaultStyle(field: keyof LinkStyle, value: LinkStyle[keyof LinkStyle]) {
   if (!props.selectedLink) return;
   emit("updateLink", props.selectedLink.key, {
     defaultStyle: {
@@ -393,9 +432,128 @@ function updateLinkDefaultStyle(field: keyof LinkStyle, value: string | number |
   });
 }
 
+function updateLinkGlowStyle(field: keyof NonNullable<LinkStyle["glow"]>, value: string | number | boolean) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, {
+    defaultStyle: {
+      ...(props.selectedLink.defaultStyle ?? {}),
+      glow: {
+        ...(props.selectedLink.defaultStyle?.glow ?? {}),
+        [field]: value
+      }
+    }
+  });
+}
+
+function updateLinkFlowStyle(field: keyof NonNullable<LinkStyle["flow"]>, value: string | number | number[] | undefined) {
+  if (!props.selectedLink) return;
+  emit("updateLink", props.selectedLink.key, {
+    defaultStyle: {
+      ...(props.selectedLink.defaultStyle ?? {}),
+      flow: {
+        ...(props.selectedLink.defaultStyle?.flow ?? {}),
+        [field]: value
+      }
+    }
+  });
+}
+
 function updateLinkFlowDirection(value: LinkStyle["flowDirection"]) {
   if (!value) return;
   updateLinkDefaultStyle("flowDirection", value);
+}
+
+function dashForPreset(value: string, fallback: number[] | undefined) {
+  if (value === "custom") return fallback?.length ? [...fallback] : [9, 9];
+  const preset = linkDashPresets.find((item) => item.value === value);
+  return preset?.dash ? [...preset.dash] : undefined;
+}
+
+function updateLinkDashPreset(value: string) {
+  updateLinkDefaultStyle("dash", dashForPreset(value, props.selectedLink?.defaultStyle?.dash));
+}
+
+function updateLinkFlowDashPreset(value: string) {
+  updateLinkFlowStyle("dash", dashForPreset(value, props.selectedLink?.defaultStyle?.flow?.dash));
+}
+
+function updateRunningRuleDashPreset(value: string) {
+  runningRuleForm.dash = dashForPreset(value, runningRuleForm.dash);
+}
+
+function updateRunningRuleFlowDashPreset(value: string) {
+  runningRuleForm.flowDash = dashForPreset(value, runningRuleForm.flowDash);
+}
+
+function linkDashPresetValue(dash?: number[]) {
+  if (!dash?.length) return "solid";
+  const current = dash?.join(",");
+  return linkDashPresets.find((item) => item.value !== "custom" && item.dash?.join(",") === current)?.value ?? "custom";
+}
+
+function dashText(dash?: number[]) {
+  return dash?.join(", ") ?? "";
+}
+
+function parseDashText(value: string) {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  const parts = normalized.replace(/^\[|\]$/g, "").split(/[\s,，]+/).filter(Boolean);
+  const dash = parts.map((item) => Number(item));
+  if (!dash.length || dash.some((item) => !Number.isFinite(item) || item < 0)) return null;
+  return dash;
+}
+
+function updateLinkDashFromText(value: string) {
+  const dash = parseDashText(value);
+  if (dash === null) {
+    ElMessage.warning("请输入有效的虚线数组，例如 9, 9");
+    return;
+  }
+  updateLinkDefaultStyle("dash", dash);
+}
+
+function updateLinkFlowDashFromText(value: string) {
+  const dash = parseDashText(value);
+  if (dash === null) {
+    ElMessage.warning("请输入有效的流线虚线数组，例如 9, 9");
+    return;
+  }
+  updateLinkFlowStyle("dash", dash);
+}
+
+function updateRunningRuleDashFromText(value: string) {
+  const dash = parseDashText(value);
+  if (dash === null) {
+    ElMessage.warning("请输入有效的主线虚线数组，例如 9, 9");
+    return;
+  }
+  runningRuleForm.dash = dash;
+}
+
+function updateRunningRuleFlowDashFromText(value: string) {
+  const dash = parseDashText(value);
+  if (dash === null) {
+    ElMessage.warning("请输入有效的流线虚线数组，例如 9, 9");
+    return;
+  }
+  runningRuleForm.flowDash = dash;
+}
+
+function percentToOpacity(value: string) {
+  const percent = Number(value);
+  if (!Number.isFinite(percent)) return 1;
+  return Math.max(0, Math.min(1, percent / 100));
+}
+
+function numberInRange(value: string | number, min: number, max: number, fallback: number) {
+  const nextValue = Number(value);
+  if (!Number.isFinite(nextValue)) return fallback;
+  return Math.max(min, Math.min(max, nextValue));
+}
+
+function opacityToPercent(value: number | undefined, fallback = 1) {
+  return Math.round((value ?? fallback) * 100);
 }
 
 function createRuleId(prefix: string) {
@@ -474,6 +632,8 @@ const selectedNodeType = computed(() => props.selectedNode ? nodeTypeOf(props.se
 const isSelectedAnnotationNode = computed(() => selectedNodeType.value?.category === "annotation");
 
 const isSelectedControlNode = computed(() => selectedNodeType.value?.category === "control" || selectedNodeType.value?.template === "buttonTemplate");
+
+const canPositionSelectedNodeLabel = computed(() => !!props.selectedNode && !props.selectedNode.isGroup && !isSelectedAnnotationNode.value && !isSelectedControlNode.value);
 
 const availableParentGroups = computed(() => {
   const selected = props.selectedNode ?? null;
@@ -730,6 +890,7 @@ function updateLinkRuleState(state: NonNullable<LinkRuntimeRule["action"]["state
   runningRuleForm.lineState = state;
   const option = linkStateOptions.find((item) => item.value === state);
   if (option) runningRuleForm.color = option.color;
+  if (state === "running") runningRuleForm.animated = true;
 }
 
 function updateLinkRuleStateFromValue(value: string) {
@@ -779,6 +940,60 @@ function addLinkRule(rule: LinkRuntimeRule) {
       rule
     ]
   });
+}
+
+function buildRunningRuleStyle() {
+  const style: LinkStyle = {};
+  if (runningRuleForm.overrideMainStyle) {
+    style.color = runningRuleForm.color;
+    style.width = Math.max(1, Math.round(Number(runningRuleForm.width) || 3));
+    style.opacity = numberInRange(runningRuleForm.opacity, 0, 1, 1);
+    style.lineCap = runningRuleForm.lineCap;
+    style.dash = runningRuleForm.dash ? [...runningRuleForm.dash] : undefined;
+  }
+  if (runningRuleForm.overrideFlowStyle) {
+    style.animated = runningRuleForm.animated;
+    style.flowDirection = runningRuleForm.flowDirection;
+    style.flow = {
+      color: runningRuleForm.flowColor,
+      width: Math.max(1, Math.round(Number(runningRuleForm.flowWidth) || 3)),
+      opacity: numberInRange(runningRuleForm.flowOpacity, 0, 1, 0.85),
+      dash: runningRuleForm.flowDash ? [...runningRuleForm.flowDash] : undefined,
+      speed: numberInRange(runningRuleForm.flowSpeed, 0, 10, 4)
+    };
+  }
+  return Object.keys(style).length ? style : undefined;
+}
+
+function previewRunningRuleForm() {
+  if (!props.selectedLink) return;
+  activeLinkPreview.value = { linkKey: props.selectedLink.key, source: "form" };
+  emit("previewLinkStyle", props.selectedLink.key, buildRunningRuleStyle() ?? {});
+}
+
+function previewLinkRule(rule: LinkRuntimeRule) {
+  if (!props.selectedLink) return;
+  activeLinkPreview.value = { linkKey: props.selectedLink.key, source: "rule", ruleId: rule.id };
+  emit("previewLinkStyle", props.selectedLink.key, rule.action.style ?? {});
+}
+
+function clearLinkPreview() {
+  emit("clearLinkStylePreview", props.selectedLink?.key);
+  activeLinkPreview.value = null;
+}
+
+function isPreviewingRunningRuleForm() {
+  const preview = activeLinkPreview.value;
+  if (!preview) return false;
+  return preview.linkKey === props.selectedLink?.key && preview.source === "form";
+}
+
+function isPreviewingLinkRule(rule: LinkRuntimeRule) {
+  const preview = activeLinkPreview.value;
+  if (!preview) return false;
+  return preview.linkKey === props.selectedLink?.key
+    && preview.source === "rule"
+    && preview.ruleId === rule.id;
 }
 
 function addNodeStatusRule() {
@@ -872,6 +1087,7 @@ function addRunningStateRule() {
   const sourceId = runningRuleForm.sourceId || defaultRuleSourceId(sourceNode);
   const field = expressionFieldWithSource(sourceNode, ruleField, sourceId);
   const lineStateLabel = linkStateOptions.find((item) => item.value === runningRuleForm.lineState)?.label ?? runningRuleForm.lineState;
+  const style = buildRunningRuleStyle();
   addLinkRule({
     id: createRuleId("rule_link_running"),
     name: `${sourceNode?.label ?? runningRuleForm.nodeKey}.${ruleField} = ${String(value)} 时线路${lineStateLabel}`,
@@ -892,12 +1108,7 @@ function addRunningStateRule() {
     },
     action: {
       state: runningRuleForm.lineState,
-      style: {
-        color: runningRuleForm.color,
-        width: Math.max(1, Math.round(Number(runningRuleForm.width) || 3)),
-        animated: runningRuleForm.lineState === "running",
-        flowDirection: runningRuleForm.flowDirection
-      }
+      ...(style ? { style } : {})
     }
   });
 }
@@ -931,7 +1142,14 @@ function addBreakerRunningRule() {
         color: "#22c55e",
         width: 3,
         animated: true,
-        flowDirection: "fromTo"
+        flowDirection: "fromTo",
+        flow: {
+          color: "#ffffff",
+          width: 3,
+          opacity: 0.85,
+          dash: [9, 9],
+          speed: 4
+        }
       }
     }
   });
@@ -973,6 +1191,9 @@ function addVoltageFaultRule() {
 
 function removeLinkRule(ruleId: string) {
   if (!props.selectedLink) return;
+  if (activeLinkPreview.value?.linkKey === props.selectedLink.key && activeLinkPreview.value.ruleId === ruleId) {
+    clearLinkPreview();
+  }
   emit("updateLink", props.selectedLink.key, {
     rules: (props.selectedLink.rules ?? []).filter((rule) => rule.id !== ruleId)
   });
@@ -1018,6 +1239,10 @@ watch(
     if (!props.selectedLink) return;
     const preferredNodeKey = props.selectedLink.from || props.topology?.nodes[0]?.key || "";
     const linkChanged = activeRuleLinkKey !== props.selectedLink.key;
+    if (linkChanged && activeRuleLinkKey) {
+      emit("clearLinkStylePreview", activeRuleLinkKey);
+      activeLinkPreview.value = null;
+    }
     activeRuleLinkKey = props.selectedLink.key;
     const nextNodeKey = !linkChanged && props.topology?.nodes.some((node) => node.key === runningRuleForm.nodeKey)
       ? runningRuleForm.nodeKey
@@ -1130,6 +1355,17 @@ watch(
               @change="updateShowLabel(($event.target as HTMLInputElement).checked)"
             />
             展示名称
+          </label>
+          <label v-if="canPositionSelectedNodeLabel">
+            名称位置
+            <select
+              :value="nodeLabelPosition(selectedNode)"
+              @change="updateLabelPosition(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="option in nodeLabelPositionOptions" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
           </label>
         </section>
 
@@ -1605,7 +1841,7 @@ watch(
           <label class="checkbox-row">
             <input
               type="checkbox"
-              :checked="selectedLink.showArrow !== false"
+              :checked="selectedLink.showArrow === true"
               @change="updateLinkArrow(($event.target as HTMLInputElement).checked)"
             />
             显示箭头
@@ -1614,6 +1850,7 @@ watch(
 
         <section class="property-section">
           <div class="section-title">默认样式</div>
+          <div class="subsection-title">基础样式</div>
           <label>
             颜色
             <input
@@ -1631,6 +1868,58 @@ watch(
               @change="updateLinkDefaultStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
             />
           </label>
+          <label>
+            透明度
+            <input
+              type="number"
+              min="0"
+              max="100"
+              :value="opacityToPercent(selectedLink.defaultStyle?.opacity)"
+              @input="updateLinkDefaultStyle('opacity', percentToOpacity(($event.target as HTMLInputElement).value))"
+              @change="updateLinkDefaultStyle('opacity', percentToOpacity(($event.target as HTMLInputElement).value))"
+            />
+          </label>
+          <label>
+            线端
+            <select
+              :value="selectedLink.defaultStyle?.lineCap ?? 'butt'"
+              @change="updateLinkDefaultStyle('lineCap', ($event.target as HTMLSelectElement).value as LinkStyle['lineCap'])"
+            >
+              <option value="butt">平直</option>
+              <option value="round">圆角</option>
+              <option value="square">方形</option>
+            </select>
+          </label>
+
+          <div class="subsection-title">主线样式</div>
+          <label>
+            主线虚线
+            <select
+              :value="linkDashPresetValue(selectedLink.defaultStyle?.dash)"
+              @change="updateLinkDashPreset(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="preset in linkDashPresets" :key="preset.value" :value="preset.value">
+                {{ preset.label }}
+              </option>
+            </select>
+          </label>
+          <label v-if="linkDashPresetValue(selectedLink.defaultStyle?.dash) === 'custom'">
+            <span class="label-with-help">
+              主线虚线数组
+              <button
+                type="button"
+                class="help-button"
+                title="虚线数组按“画线长度、空白长度”循环。例如 [9, 9] 表示画 9px，空 9px；[12, 6, 2, 6] 表示画 12px，空 6px，画 2px，空 6px。"
+              >?</button>
+            </span>
+            <input
+              :value="dashText(selectedLink.defaultStyle?.dash)"
+              placeholder="例如 9, 9"
+              @change="updateLinkDashFromText(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+
+          <div class="subsection-title">流线样式</div>
           <label class="checkbox-row">
             <input
               type="checkbox"
@@ -1639,16 +1928,126 @@ watch(
             />
             是否流线
           </label>
+          <div class="size-grid">
+            <label>
+              流向
+              <select
+                :value="selectedLink.defaultStyle?.flowDirection ?? 'fromTo'"
+                @change="updateLinkFlowDirection(($event.target as HTMLSelectElement).value as LinkStyle['flowDirection'])"
+              >
+                <option value="fromTo">正向</option>
+                <option value="toFrom">反向</option>
+                <option value="both">双向</option>
+              </select>
+            </label>
+            <label>
+              流速
+              <input
+                type="number"
+                min="0"
+                max="10"
+                step="1"
+                :value="selectedLink.defaultStyle?.flow?.speed ?? 4"
+                @input="updateLinkFlowStyle('speed', numberInRange(($event.target as HTMLInputElement).value, 0, 10, 4))"
+                @change="updateLinkFlowStyle('speed', numberInRange(($event.target as HTMLInputElement).value, 0, 10, 4))"
+              />
+            </label>
+          </div>
+          <div class="size-grid">
+            <label>
+              流线颜色
+              <input
+                type="color"
+                :value="selectedLink.defaultStyle?.flow?.color ?? '#ffffff'"
+                @input="updateLinkFlowStyle('color', ($event.target as HTMLInputElement).value)"
+              />
+            </label>
+            <label>
+              流线宽度
+              <input
+                type="number"
+                min="1"
+                :value="selectedLink.defaultStyle?.flow?.width ?? 3"
+                @input="updateLinkFlowStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
+                @change="updateLinkFlowStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
+              />
+            </label>
+          </div>
           <label>
-            流向
+            流线透明度
+            <input
+              type="number"
+              min="0"
+              max="100"
+              :value="opacityToPercent(selectedLink.defaultStyle?.flow?.opacity, 0.85)"
+              @input="updateLinkFlowStyle('opacity', percentToOpacity(($event.target as HTMLInputElement).value))"
+              @change="updateLinkFlowStyle('opacity', percentToOpacity(($event.target as HTMLInputElement).value))"
+            />
+          </label>
+          <label>
+            流线虚线
             <select
-              :value="selectedLink.defaultStyle?.flowDirection ?? 'fromTo'"
-              @change="updateLinkFlowDirection(($event.target as HTMLSelectElement).value as LinkStyle['flowDirection'])"
+              :value="linkDashPresetValue(selectedLink.defaultStyle?.flow?.dash)"
+              @change="updateLinkFlowDashPreset(($event.target as HTMLSelectElement).value)"
             >
-              <option value="fromTo">正向</option>
-              <option value="toFrom">反向</option>
-              <option value="both">双向</option>
+              <option v-for="preset in linkDashPresets" :key="preset.value" :value="preset.value">
+                {{ preset.label }}
+              </option>
             </select>
+          </label>
+          <label v-if="linkDashPresetValue(selectedLink.defaultStyle?.flow?.dash) === 'custom'">
+            <span class="label-with-help">
+              流线虚线数组
+              <button
+                type="button"
+                class="help-button"
+                title="虚线数组按“画线长度、空白长度”循环。例如 [9, 9] 表示画 9px，空 9px；[12, 6, 2, 6] 表示画 12px，空 6px，画 2px，空 6px。"
+              >?</button>
+            </span>
+            <input
+              :value="dashText(selectedLink.defaultStyle?.flow?.dash)"
+              placeholder="例如 9, 9"
+              @change="updateLinkFlowDashFromText(($event.target as HTMLInputElement).value)"
+            />
+          </label>
+
+          <div class="subsection-title">发光样式</div>
+          <label class="checkbox-row">
+            <input
+              type="checkbox"
+              :checked="selectedLink.defaultStyle?.glow?.enabled ?? false"
+              @change="updateLinkGlowStyle('enabled', ($event.target as HTMLInputElement).checked)"
+            />
+            发光
+          </label>
+          <label>
+            发光颜色
+            <input
+              type="color"
+              :value="selectedLink.defaultStyle?.glow?.color ?? selectedLink.defaultStyle?.color ?? '#42B0FF'"
+              @input="updateLinkGlowStyle('color', ($event.target as HTMLInputElement).value)"
+            />
+          </label>
+          <label>
+            发光宽度
+            <input
+              type="number"
+              min="1"
+              :value="selectedLink.defaultStyle?.glow?.width ?? Math.max(8, (selectedLink.defaultStyle?.width ?? 2) + 8)"
+              @input="updateLinkGlowStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
+              @change="updateLinkGlowStyle('width', Math.max(1, Number(($event.target as HTMLInputElement).value) || 1))"
+            />
+          </label>
+          <label>
+            发光透明度
+            <input
+              type="number"
+              min="0"
+              max="100"
+              :value="opacityToPercent(selectedLink.defaultStyle?.glow?.opacity, 0.28)"
+              @input="updateLinkGlowStyle('opacity', percentToOpacity(($event.target as HTMLInputElement).value))"
+              @change="updateLinkGlowStyle('opacity', percentToOpacity(($event.target as HTMLInputElement).value))"
+            />
           </label>
         </section>
 
@@ -1721,25 +2120,142 @@ watch(
                 <input v-model.number="runningRuleForm.priority" type="number" />
               </label>
             </div>
-            <div class="size-grid">
+            <label class="checkbox-row">
+              <input v-model="runningRuleForm.overrideMainStyle" type="checkbox" />
+              覆盖主线样式
+            </label>
+            <template v-if="runningRuleForm.overrideMainStyle">
+              <div class="size-grid">
+                <label>
+                  主线颜色
+                  <input v-model="runningRuleForm.color" type="color" />
+                </label>
+                <label>
+                  主线宽度
+                  <input v-model.number="runningRuleForm.width" type="number" min="1" />
+                </label>
+              </div>
+              <div class="size-grid">
+                <label>
+                  主线透明度
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    :value="opacityToPercent(runningRuleForm.opacity)"
+                    @input="runningRuleForm.opacity = percentToOpacity(($event.target as HTMLInputElement).value)"
+                  />
+                </label>
+                <label>
+                  线端
+                  <select v-model="runningRuleForm.lineCap">
+                    <option value="butt">平直</option>
+                    <option value="round">圆角</option>
+                    <option value="square">方形</option>
+                  </select>
+                </label>
+              </div>
               <label>
-                运行线宽
-                <input v-model.number="runningRuleForm.width" type="number" />
-              </label>
-              <label>
-                状态颜色
-                <input v-model="runningRuleForm.color" type="color" />
-              </label>
-            </div>
-            <div class="size-grid">
-              <label>
-                流向
-                <select v-model="runningRuleForm.flowDirection">
-                  <option value="fromTo">正向</option>
-                  <option value="toFrom">反向</option>
-                  <option value="both">双向</option>
+                主线虚线
+                <select
+                  :value="linkDashPresetValue(runningRuleForm.dash)"
+                  @change="updateRunningRuleDashPreset(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="preset in linkDashPresets" :key="preset.value" :value="preset.value">
+                    {{ preset.label }}
+                  </option>
                 </select>
               </label>
+              <label v-if="linkDashPresetValue(runningRuleForm.dash) === 'custom'">
+                <span class="label-with-help">
+                  主线虚线数组
+                  <button
+                    type="button"
+                    class="help-button"
+                    title="虚线数组按“画线长度、空白长度”循环。例如 [9, 9] 表示画 9px，空 9px；[12, 6, 2, 6] 表示画 12px，空 6px，画 2px，空 6px。"
+                  >?</button>
+                </span>
+                <input
+                  :value="dashText(runningRuleForm.dash)"
+                  placeholder="例如 9, 9"
+                  @change="updateRunningRuleDashFromText(($event.target as HTMLInputElement).value)"
+                />
+              </label>
+            </template>
+
+            <label class="checkbox-row">
+              <input v-model="runningRuleForm.overrideFlowStyle" type="checkbox" />
+              覆盖流线样式
+            </label>
+            <template v-if="runningRuleForm.overrideFlowStyle">
+              <label class="checkbox-row">
+                <input v-model="runningRuleForm.animated" type="checkbox" />
+                是否流线
+              </label>
+              <div class="size-grid">
+                <label>
+                  流向
+                  <select v-model="runningRuleForm.flowDirection">
+                    <option value="fromTo">正向</option>
+                    <option value="toFrom">反向</option>
+                    <option value="both">双向</option>
+                  </select>
+                </label>
+                <label>
+                  流速
+                  <input v-model.number="runningRuleForm.flowSpeed" type="number" min="0" max="10" step="1" />
+                </label>
+              </div>
+              <div class="size-grid">
+                <label>
+                  流线颜色
+                  <input v-model="runningRuleForm.flowColor" type="color" />
+                </label>
+                <label>
+                  流线宽度
+                  <input v-model.number="runningRuleForm.flowWidth" type="number" min="1" />
+                </label>
+              </div>
+              <label>
+                流线透明度
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  :value="opacityToPercent(runningRuleForm.flowOpacity, 0.85)"
+                  @input="runningRuleForm.flowOpacity = percentToOpacity(($event.target as HTMLInputElement).value)"
+                />
+              </label>
+              <label>
+                流线虚线
+                <select
+                  :value="linkDashPresetValue(runningRuleForm.flowDash)"
+                  @change="updateRunningRuleFlowDashPreset(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="preset in linkDashPresets" :key="preset.value" :value="preset.value">
+                    {{ preset.label }}
+                  </option>
+                </select>
+              </label>
+              <label v-if="linkDashPresetValue(runningRuleForm.flowDash) === 'custom'">
+                <span class="label-with-help">
+                  流线虚线数组
+                  <button
+                    type="button"
+                    class="help-button"
+                    title="虚线数组按“画线长度、空白长度”循环。例如 [9, 9] 表示画 9px，空 9px；[12, 6, 2, 6] 表示画 12px，空 6px，画 2px，空 6px。"
+                  >?</button>
+                </span>
+                <input
+                  :value="dashText(runningRuleForm.flowDash)"
+                  placeholder="例如 9, 9"
+                  @change="updateRunningRuleFlowDashFromText(($event.target as HTMLInputElement).value)"
+                />
+              </label>
+            </template>
+            <div class="button-row">
+              <button v-if="!isPreviewingRunningRuleForm()" type="button" @click="previewRunningRuleForm">预览当前规则</button>
+              <button v-else type="button" @click="clearLinkPreview">停止预览</button>
             </div>
             <button type="button" @click="addRunningStateRule">添加运行态规则</button>
           </div>
@@ -1754,7 +2270,11 @@ watch(
                 <span>优先级 {{ rule.priority }}</span>
                 <span>{{ describeRule(rule) }}</span>
               </div>
-              <button type="button" @click="removeLinkRule(rule.id)">删除</button>
+              <div class="rule-item-actions">
+                <button v-if="!isPreviewingLinkRule(rule)" type="button" @click="previewLinkRule(rule)">预览</button>
+                <button v-else type="button" @click="clearLinkPreview">停止</button>
+                <button type="button" @click="removeLinkRule(rule.id)">删除</button>
+              </div>
             </div>
           </div>
           <div v-else class="hint">暂无运行规则。</div>
@@ -1885,10 +2405,50 @@ watch(
   font-weight: 700;
 }
 
+.subsection-title {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .size-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.button-row {
+  display: grid;
+  gap: 8px;
+}
+
+.label-with-help {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.help-button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: #0369a1;
+  font-size: 12px;
+  line-height: 1;
+  background: #e0f2fe;
+  border-color: #bae6fd;
+  border-radius: 999px;
+}
+
+.help-button:hover {
+  background: #bae6fd;
+}
+
+.rule-item-actions {
+  display: grid;
+  gap: 6px;
+  min-width: 66px;
 }
 
 .layer-actions {

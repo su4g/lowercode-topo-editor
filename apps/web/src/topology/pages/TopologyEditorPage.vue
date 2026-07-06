@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DataSourceReference, DataSourceType, NodeTypeDefinition, TopologyData, TopologyLink, TopologyNode } from "@topo-editor/topology-shared";
+import type { DataSourceReference, DataSourceType, LinkStyle, NodeTypeDefinition, TopologyData, TopologyLink, TopologyNode } from "@topo-editor/topology-shared";
 import { ElMessage } from "element-plus";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -21,11 +21,12 @@ const canvasRef = ref<{
   exportTopology: () => TopologyData | null;
   updateNodeDataFromProps: (nodeKey: string, patch: Partial<TopologyNode>) => void;
   updateLinkDataFromProps: (linkKey: string, patch: Partial<TopologyLink>) => void;
+  previewLinkStyle: (linkKey: string, style: LinkStyle) => void;
+  clearLinkStylePreview: (linkKey?: string) => void;
   undo: () => void;
   redo: () => void;
   deleteSelection: () => void;
   fitView: () => void;
-  autoLayout: () => void;
   exportSvg: () => void;
 } | null>(null);
 const selectedNode = computed(() => topology.value?.nodes.find((node) => node.key === selectedKey.value) ?? null);
@@ -219,6 +220,7 @@ function addNode(payload: { nodeType: NodeTypeDefinition; loc?: string; groupKey
         typeId: nodeType.id,
         isGroup: nodeType.isGroup,
         label: `${nodeType.name}${index}`,
+        labelPosition: "bottom",
         loc: loc ?? `${160 + index * 36} ${120 + index * 24}`,
         size: `${size.width} ${size.height}`,
         zOrder,
@@ -272,10 +274,30 @@ function updateLink(key: string, patch: Partial<TopologyLink>) {
       return {
         ...link,
         ...patch,
+        defaultStyle: patch.defaultStyle
+          ? {
+              ...link.defaultStyle,
+              ...patch.defaultStyle,
+              flow: patch.defaultStyle.flow
+                ? { ...(link.defaultStyle?.flow ?? {}), ...patch.defaultStyle.flow }
+                : link.defaultStyle?.flow,
+              glow: patch.defaultStyle.glow
+                ? { ...(link.defaultStyle?.glow ?? {}), ...patch.defaultStyle.glow }
+                : link.defaultStyle?.glow
+            }
+          : link.defaultStyle,
         runtime: patch.runtime ? { ...link.runtime, ...patch.runtime } : link.runtime
       };
     })
   };
+}
+
+function previewLinkStyle(linkKey: string, style: LinkStyle) {
+  canvasRef.value?.previewLinkStyle(linkKey, style);
+}
+
+function clearLinkStylePreview(linkKey?: string) {
+  canvasRef.value?.clearLinkStylePreview(linkKey);
 }
 
 async function save() {
@@ -319,10 +341,6 @@ function fitView() {
   canvasRef.value?.fitView();
 }
 
-function autoLayout() {
-  canvasRef.value?.autoLayout();
-}
-
 function exportSvg() {
   canvasRef.value?.exportSvg();
 }
@@ -343,7 +361,6 @@ onMounted(async () => {
       <el-button :disabled="!topology" @click="undo">撤销</el-button>
       <el-button :disabled="!topology" @click="redo">重做</el-button>
       <el-button :disabled="!topology" @click="fitView">适配</el-button>
-      <el-button :disabled="!topology" @click="autoLayout">整理</el-button>
       <el-button :disabled="!topology" type="danger" plain @click="deleteSelection">删除</el-button>
       <el-button :disabled="!topology" @click="apiDialogVisible = true">接口配置</el-button>
       <el-button :disabled="!topology" @click="exportSvg">导出 SVG</el-button>
@@ -374,6 +391,8 @@ onMounted(async () => {
         @update-node="updateNode"
         @update-link="updateLink"
         @select-item="selectedKey = $event"
+        @preview-link-style="previewLinkStyle"
+        @clear-link-style-preview="clearLinkStylePreview"
       />
     </section>
     <el-dialog v-model="apiDialogVisible" title="拓扑接口配置" width="980px" class="api-config-dialog">

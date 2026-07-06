@@ -15,10 +15,13 @@ export type NodeEventConfig = {
   preventDefault?: boolean;
 };
 
+export type NodeLabelPosition = "top" | "right" | "bottom" | "left";
+
 export type TopologyNode = {
   key: string;
   typeId: string;
   label: string;
+  labelPosition?: NodeLabelPosition;
   loc: string;
   size?: string;
   angle?: number;

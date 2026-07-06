@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import "../../../core/go.js";
 import type * as GoJS from "gojs";
-import { getNodePorts, readExpressionPath, resolveExpressionValue, type NodeEventConfig, type NodeTypeDefinition, type PortDefinition, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { getNodePorts, readExpressionPath, resolveExpressionValue, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeTypeDefinition, type PortDefinition, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const props = defineProps<{
@@ -25,11 +25,12 @@ defineExpose({
   exportTopology,
   updateNodeDataFromProps,
   updateLinkDataFromProps,
+  previewLinkStyle,
+  clearLinkStylePreview,
   undo,
   redo,
   deleteSelection,
   fitView,
-  autoLayout,
   exportSvg
 });
 
@@ -42,6 +43,7 @@ let skipNextTopologyApply = false;
 let lastTopologyRenderSignature = "";
 let flowTimer: number | undefined;
 let flowOffset = 0;
+let linkStylePreview: { linkKey: string; style: LinkStyle } | null = null;
 let miniViewDrag:
   | {
     didMove: boolean;
@@ -51,8 +53,13 @@ let miniViewDrag:
   }
   | null = null;
 
-const SNAP_GRID_SIZE = 10;
+const SNAP_GRID_SIZE = 2;
+const VISIBLE_GRID_SIZE = 10;
 const OVERVIEW_VIEWPORT_BOX_NAME = "VIEWPORT_BOX";
+const FIXED_PORT_SIDES: PortSide[] = ["top", "right", "bottom", "left"];
+const PORT_VISUAL_OFFSET = 14;
+const PORT_SIZE = 12;
+const VISUAL_PORT_PREFIX = "__visual__";
 
 type PortSide = "left" | "right" | "top" | "bottom";
 
@@ -87,6 +94,48 @@ function getGo() {
 function cloneModelArray<T>(value: T[]): T[] {
   return JSON.parse(JSON.stringify(value)) as T[];
 }
+
+function cloneModelValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+type LinkCreationDefaults = {
+  direction: NonNullable<TopologyLink["direction"]>;
+  showArrow: boolean;
+  linkType: NonNullable<TopologyLink["linkType"]>;
+  defaultState: NonNullable<TopologyLink["defaultState"]>;
+  defaultStyle: LinkStyle;
+};
+
+const INITIAL_LINK_DEFAULT_STYLE: LinkStyle = {
+  color: "#42B0FF",
+  width: 2,
+  opacity: 1,
+  lineCap: "butt",
+  animated: false,
+  flowDirection: "fromTo",
+  flow: {
+    color: "#ffffff",
+    width: 3,
+    opacity: 0.85,
+    dash: [9, 9],
+    speed: 4
+  },
+  glow: {
+    enabled: false,
+    color: "#42B0FF",
+    width: 10,
+    opacity: 0.28
+  }
+};
+
+let linkCreationDefaults: LinkCreationDefaults = {
+  direction: "forward",
+  showArrow: false,
+  linkType: "power-line",
+  defaultState: "off",
+  defaultStyle: cloneModelArray([INITIAL_LINK_DEFAULT_STYLE])[0]
+};
 
 function roundPointValue(value: number) {
   return Math.round(value * 100) / 100;
@@ -333,6 +382,8 @@ function buildDiagramLinks(links: TopologyData["links"]): DiagramLinkData[] {
     const normalizedPoints = normalizePointArray(link.points);
     return {
       ...link,
+      fromPort: normalizePortId(link.fromPort),
+      toPort: normalizePortId(link.toPort),
       ...(normalizedPoints ? { points: normalizedPoints } : {})
     };
   });
@@ -352,7 +403,8 @@ function serializeLinkPoints(link: GoJS.Link): SerializablePoint[] | undefined {
 
 function exportDiagramLinks(model: GoJS.GraphLinksModel): TopologyData["links"] {
   return (model.linkDataArray as DiagramLinkData[]).map((linkData) => {
-    const { points, ...restLink } = cloneModelArray([linkData])[0];
+    const { points, ...restLinkData } = linkData;
+    const restLink = cloneModelValue(restLinkData);
     const link = diagram?.findLinkForData(linkData);
     const livePoints = link ? serializeLinkPoints(link) : normalizePointArray(points);
     return {
@@ -370,8 +422,51 @@ function toGoSpot(side: PortSide) {
   return go.Spot.Bottom;
 }
 
+function normalizeLabelPosition(position?: string): NodeLabelPosition {
+  if (position === "top" || position === "right" || position === "left") return position;
+  return "bottom";
+}
+
+function toGoLabelAlignment(position?: string) {
+  const go = getGo();
+  const labelPosition = normalizeLabelPosition(position);
+  if (labelPosition === "top") return new go.Spot(0.5, 0, 0, -8);
+  if (labelPosition === "right") return new go.Spot(1, 0.5, 8, 0);
+  if (labelPosition === "left") return new go.Spot(0, 0.5, -8, 0);
+  return new go.Spot(0.5, 1, 0, 8);
+}
+
+function toGoLabelAlignmentFocus(position?: string) {
+  const go = getGo();
+  const labelPosition = normalizeLabelPosition(position);
+  if (labelPosition === "top") return go.Spot.Bottom;
+  if (labelPosition === "right") return go.Spot.Left;
+  if (labelPosition === "left") return go.Spot.Right;
+  return go.Spot.Top;
+}
+
+function toGoRealPortAlignment(side: PortSide) {
+  const go = getGo();
+  const inset = PORT_SIZE / 2;
+  if (side === "left") return new go.Spot(0, 0.5, inset, 0);
+  if (side === "right") return new go.Spot(1, 0.5, -inset, 0);
+  if (side === "top") return new go.Spot(0.5, 0, 0, inset);
+  return new go.Spot(0.5, 1, 0, -inset);
+}
+
 function portForSide(ports: DiagramPortData[] | undefined, side: PortSide) {
   return ports?.find((port) => port.id === side) ?? ports?.find((port) => port.side === side);
+}
+
+function visualPortId(side: PortSide) {
+  return `${VISUAL_PORT_PREFIX}${side}`;
+}
+
+function normalizePortId(portId?: string | null) {
+  if (!portId) return undefined;
+  return portId?.startsWith(VISUAL_PORT_PREFIX)
+    ? portId.slice(VISUAL_PORT_PREFIX.length)
+    : portId;
 }
 
 function portLabelForSide(ports: DiagramPortData[] | undefined, side: PortSide) {
@@ -429,7 +524,7 @@ function canLinkTo(direction?: PortDefinition["direction"]) {
 }
 
 function findNodePort(typeId: string, portId: string) {
-  return getNodePorts(nodeTypeOf(typeId)?.ports).find((port) => port.id === portId);
+  return getNodePorts(nodeTypeOf(typeId)?.ports).find((port) => port.id === normalizePortId(portId));
 }
 
 function getConnectedCount(node: GoJS.Node, portId: string, direction: "from" | "to") {
@@ -440,8 +535,8 @@ function getConnectedCount(node: GoJS.Node, portId: string, direction: "from" | 
 }
 
 function validateLink(fromNode: GoJS.Node, fromPort: GoJS.GraphObject, toNode: GoJS.Node, toPort: GoJS.GraphObject) {
-  const fromPortId = fromPort.portId;
-  const toPortId = toPort.portId;
+  const fromPortId = normalizePortId(fromPort.portId);
+  const toPortId = normalizePortId(toPort.portId);
   if (!fromPortId || !toPortId) return false;
 
   const fromDef = findNodePort(fromNode.data.typeId, fromPortId);
@@ -470,6 +565,49 @@ function createLinkKey(model: GoJS.GraphLinksModel) {
   return key;
 }
 
+function mergeLinkStyle(base: LinkStyle | undefined, patch: LinkStyle | undefined): LinkStyle {
+  if (!patch) return cloneModelArray([base ?? INITIAL_LINK_DEFAULT_STYLE])[0];
+  return {
+    ...(base ?? {}),
+    ...patch,
+    flow: patch.flow
+      ? { ...(base?.flow ?? {}), ...patch.flow }
+      : base?.flow,
+    glow: patch.glow
+      ? { ...(base?.glow ?? {}), ...patch.glow }
+      : base?.glow
+  };
+}
+
+function cloneLinkStyle(style: LinkStyle | undefined): LinkStyle {
+  return cloneModelArray([style ?? INITIAL_LINK_DEFAULT_STYLE])[0];
+}
+
+function buildDefaultLinkRuntime(style: LinkStyle, state: NonNullable<TopologyLink["defaultState"]> = "off"): TopologyLink["runtime"] {
+  return {
+    state,
+    color: style.color ?? "#42B0FF",
+    width: style.width ?? 2,
+    opacity: style.opacity ?? 1,
+    lineCap: style.lineCap ?? "butt",
+    animated: style.animated ?? false,
+    flowDirection: style.flowDirection ?? "fromTo",
+    dash: style.dash ? [...style.dash] : undefined,
+    flow: style.flow ? cloneModelArray([style.flow])[0] : undefined,
+    glow: style.glow ? cloneModelArray([style.glow])[0] : undefined
+  };
+}
+
+function rememberLinkCreationDefaults(patch: Partial<TopologyLink>) {
+  if (patch.direction) linkCreationDefaults.direction = patch.direction;
+  if (patch.showArrow !== undefined) linkCreationDefaults.showArrow = patch.showArrow;
+  if (patch.linkType) linkCreationDefaults.linkType = patch.linkType;
+  if (patch.defaultState) linkCreationDefaults.defaultState = patch.defaultState;
+  if (patch.defaultStyle) {
+    linkCreationDefaults.defaultStyle = mergeLinkStyle(linkCreationDefaults.defaultStyle, patch.defaultStyle);
+  }
+}
+
 function createNodeKey(model: GoJS.GraphLinksModel, data: Partial<TopologyNode>) {
   const used = new Set((model.nodeDataArray as Array<{ key?: string }>).map((node) => node.key).filter(Boolean));
   const prefix = data.isGroup ? "group" : data.typeId || "node";
@@ -494,6 +632,43 @@ function configureModel(model: GoJS.GraphLinksModel) {
   return model;
 }
 
+function isConnectionToolActive(targetDiagram: GoJS.Diagram) {
+  return targetDiagram.currentTool === targetDiagram.toolManager.linkingTool
+    || targetDiagram.currentTool === targetDiagram.toolManager.relinkingTool;
+}
+
+function shouldEnableNodePort(node: GoJS.Node, side: PortSide) {
+  if (!diagram || props.mode !== "edit") return false;
+  const nodeData = node.data as DiagramNodeData | null | undefined;
+  if (!nodeData || !portForSide(nodeData.__ports, side)) return false;
+  return node.isSelected || isConnectionToolActive(diagram);
+}
+
+function portVisualName(side: PortSide) {
+  return `PORT_VISUAL_${side}`;
+}
+
+function refreshPortVisibility() {
+  if (!diagram) return;
+  diagram.nodes.each((node) => {
+    FIXED_PORT_SIDES.forEach((side) => {
+      const port = node.findPort(side);
+      const visualPort = node.findObject(portVisualName(side));
+      if (!port || !visualPort) return;
+
+      const enabled = shouldEnableNodePort(node, side);
+      port.opacity = 1;
+      port.pickable = false;
+      port.fromLinkable = false;
+      port.toLinkable = false;
+      visualPort.opacity = enabled ? 1 : 0;
+      visualPort.pickable = enabled;
+      visualPort.fromLinkable = enabled;
+      visualPort.toLinkable = enabled;
+    });
+  });
+}
+
 function updateDiagramMode() {
   if (!diagram) return;
   diagram.isReadOnly = props.mode === "runtime";
@@ -508,15 +683,7 @@ function updateDiagramMode() {
   diagram.toolManager.rotatingTool.isEnabled = props.mode === "edit";
   diagram.toolManager.linkReshapingTool.isEnabled = props.mode === "edit";
   if (props.mode === "runtime") diagram.clearSelection();
-  diagram.nodes.each((node) => {
-    ["top", "right", "bottom", "left"].forEach((portId) => {
-      const port = node.findPort(portId);
-      if (!port) return;
-      const shouldEnablePort = props.mode === "edit" && !!portForSide(node.data.__ports, portId as PortSide);
-      port.opacity = shouldEnablePort ? 1 : 0;
-      port.pickable = shouldEnablePort;
-    });
-  });
+  refreshPortVisibility();
 }
 
 function syncSelectedPart() {
@@ -528,6 +695,7 @@ function syncSelectedPart() {
 
   const part = diagram.findNodeForKey(props.selectedKey) ?? diagram.findLinkForKey(props.selectedKey);
   if (part) diagram.select(part);
+  refreshPortVisibility();
 }
 
 function exportTopology(): TopologyData | null {
@@ -573,30 +741,115 @@ function updateLinkDataFromProps(linkKey: string, patch: Partial<TopologyLink>) 
   const linkData = model.findLinkDataForKey(linkKey) as DiagramLinkData | null;
   if (!linkData) return;
 
+  if (props.mode === "edit") rememberLinkCreationDefaults(patch);
+
   model.commit((m) => {
     Object.entries(patch).forEach(([key, value]) => {
       if (key === "runtime") {
-        m.setDataProperty(linkData, "runtime", value as TopologyLink["runtime"]);
+        const nextRuntime = value as TopologyLink["runtime"];
+        m.setDataProperty(linkData, "runtime", {
+          ...(linkData.runtime ?? {}),
+          ...(nextRuntime ?? {}),
+          flow: nextRuntime?.flow
+            ? { ...(linkData.runtime?.flow ?? {}), ...nextRuntime.flow }
+            : linkData.runtime?.flow,
+          glow: nextRuntime?.glow
+            ? { ...(linkData.runtime?.glow ?? {}), ...nextRuntime.glow }
+            : linkData.runtime?.glow
+        });
+        return;
+      }
+      if (key === "defaultStyle") {
+        const nextDefaultStyle = value as TopologyLink["defaultStyle"];
+        m.setDataProperty(linkData, "defaultStyle", mergeLinkStyle(linkData.defaultStyle, nextDefaultStyle));
         return;
       }
       m.setDataProperty(linkData, key, value);
     });
+    m.updateTargetBindings(linkData);
   }, "update link from props");
+
+  const link = diagram.findLinkForData(linkData);
+  link?.invalidateRoute();
+  link?.updateRoute();
+}
+
+function refreshLinkStyleBinding(linkKey: string | undefined) {
+  if (!diagram || !linkKey) return;
+  const model = diagram.model as GoJS.GraphLinksModel;
+  const linkData = model.findLinkDataForKey(linkKey) as DiagramLinkData | null;
+  if (!linkData) return;
+  model.updateTargetBindings(linkData);
+  const link = diagram.findLinkForData(linkData);
+  link?.invalidateRoute();
+  link?.updateRoute();
+  diagram.requestUpdate();
+}
+
+function previewLinkStyle(linkKey: string, style: LinkStyle) {
+  const previousKey = linkStylePreview?.linkKey;
+  linkStylePreview = { linkKey, style: cloneModelArray([style])[0] };
+  refreshLinkStyleBinding(previousKey);
+  refreshLinkStyleBinding(linkKey);
+}
+
+function clearLinkStylePreview(linkKey?: string) {
+  if (!linkStylePreview || (linkKey && linkStylePreview.linkKey !== linkKey)) return;
+  const previousKey = linkStylePreview.linkKey;
+  linkStylePreview = null;
+  refreshLinkStyleBinding(previousKey);
+}
+
+function resolvePreviewStyle(link: DiagramLinkData) {
+  return linkStylePreview?.linkKey === link.key ? linkStylePreview.style : undefined;
 }
 
 function resolveLinkColor(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.color !== undefined) return preview.color;
+  if (props.mode === "edit") return link.defaultStyle?.color || link.runtime?.color || "#42B0FF";
   return link.runtime?.color || link.defaultStyle?.color || "#42B0FF";
 }
 
 function resolveLinkWidth(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.width !== undefined) return preview.width;
+  if (props.mode === "edit") return link.defaultStyle?.width || link.runtime?.width || 2;
   return link.runtime?.width || link.defaultStyle?.width || 2;
 }
 
+function resolveLinkOpacity(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.opacity !== undefined) return preview.opacity;
+  if (props.mode === "edit") return link.defaultStyle?.opacity ?? link.runtime?.opacity ?? 1;
+  return link.runtime?.opacity ?? link.defaultStyle?.opacity ?? 1;
+}
+
+function resolveLinkDash(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview && "dash" in preview) return preview.dash ?? null;
+  if (props.mode === "edit") return link.defaultStyle?.dash ?? link.runtime?.dash ?? null;
+  return link.runtime?.dash ?? link.defaultStyle?.dash ?? null;
+}
+
+function resolveLinkLineCap(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.lineCap !== undefined) return preview.lineCap;
+  if (props.mode === "edit") return link.defaultStyle?.lineCap || link.runtime?.lineCap || "butt";
+  return link.runtime?.lineCap || link.defaultStyle?.lineCap || "butt";
+}
+
 function resolveLinkAnimated(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.animated !== undefined) return preview.animated;
+  if (props.mode === "edit") return link.defaultStyle?.animated ?? link.runtime?.animated ?? false;
   return link.runtime?.animated ?? link.defaultStyle?.animated ?? false;
 }
 
 function resolveLinkFlowDirection(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.flowDirection !== undefined) return preview.flowDirection;
+  if (props.mode === "edit") return link.defaultStyle?.flowDirection || link.runtime?.flowDirection || "fromTo";
   return link.runtime?.flowDirection || link.defaultStyle?.flowDirection || "fromTo";
 }
 
@@ -608,13 +861,85 @@ function resolveLinkZOrder(link: DiagramLinkData) {
   return resolveLinkAnimated(link) ? 1000 : 0;
 }
 
+function resolveLinkGlow(link: DiagramLinkData) {
+  const preview = resolvePreviewStyle(link);
+  if (preview?.glow) {
+    const base = props.mode === "edit"
+      ? link.defaultStyle?.glow ?? link.runtime?.glow
+      : link.runtime?.glow ?? link.defaultStyle?.glow;
+    return { ...(base ?? {}), ...preview.glow };
+  }
+  return props.mode === "edit"
+    ? link.defaultStyle?.glow ?? link.runtime?.glow
+    : link.runtime?.glow ?? link.defaultStyle?.glow;
+}
+
+function resolveLinkGlowVisible(link: DiagramLinkData) {
+  return resolveLinkGlow(link)?.enabled === true;
+}
+
+function resolveLinkGlowColor(link: DiagramLinkData) {
+  return resolveLinkGlow(link)?.color || resolveLinkColor(link);
+}
+
+function resolveLinkGlowWidth(link: DiagramLinkData) {
+  return Math.max(resolveLinkWidth(link), resolveLinkGlow(link)?.width ?? resolveLinkWidth(link) + 8);
+}
+
+function resolveLinkGlowOpacity(link: DiagramLinkData) {
+  return resolveLinkGlow(link)?.opacity ?? 0.28;
+}
+
 function resolveFlowLinkWidth(link: DiagramLinkData) {
-  return Math.max(2, resolveLinkWidth(link));
+  return Math.max(1, resolveLinkFlow(link).width ?? Math.max(2, resolveLinkWidth(link)));
 }
 
 function resolveFlowLinkDash(link: DiagramLinkData) {
-  const width = resolveFlowLinkWidth(link);
-  return [Math.max(8, width * 3), Math.max(8, width * 3)];
+  return resolveLinkFlow(link).dash ?? [9, 9];
+}
+
+function resolveLinkFlow(link: DiagramLinkData): NonNullable<LinkStyle["flow"]> {
+  const fallback = INITIAL_LINK_DEFAULT_STYLE.flow ?? {};
+  const base = props.mode === "edit"
+    ? link.defaultStyle?.flow ?? link.runtime?.flow
+    : link.runtime?.flow ?? link.defaultStyle?.flow;
+  const preview = resolvePreviewStyle(link)?.flow;
+  return {
+    ...fallback,
+    ...(base ?? {}),
+    ...(preview ?? {})
+  };
+}
+
+function resolveFlowLinkColor(link: DiagramLinkData) {
+  return resolveLinkFlow(link).color || "#ffffff";
+}
+
+function resolveFlowLinkOpacity(link: DiagramLinkData) {
+  return resolveLinkFlow(link).opacity ?? Math.min(0.9, Math.max(0.45, resolveLinkOpacity(link) * 0.85));
+}
+
+function resolveFlowLinkSpeed(link: DiagramLinkData) {
+  const speed = Number(resolveLinkFlow(link).speed ?? 4);
+  if (!Number.isFinite(speed)) return 4;
+  return Math.max(0, Math.min(10, speed));
+}
+
+function resolveFlowDashCycle(link: DiagramLinkData) {
+  const cycle = resolveFlowLinkDash(link).reduce((sum, item) => {
+    return sum + (Number.isFinite(item) && item > 0 ? item : 0);
+  }, 0);
+  return cycle > 0 ? cycle : 18;
+}
+
+function resolveFlowDashOffset(link: DiagramLinkData, offset: number) {
+  if (offset === 0) return 0;
+  const cycle = resolveFlowDashCycle(link);
+  const normalizedOffset = ((offset % cycle) + cycle) % cycle;
+  if (resolveLinkFlowDirection(link) === "toFrom") {
+    return normalizedOffset === 0 ? 0 : cycle - normalizedOffset;
+  }
+  return normalizedOffset;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -820,19 +1145,6 @@ function fitRuntimeView() {
   );
 }
 
-function autoLayout() {
-  if (!diagram || props.mode !== "edit") return;
-  const go = getGo();
-  diagram.commit((targetDiagram) => {
-    targetDiagram.layout = new go.LayeredDigraphLayout({
-      columnSpacing: 70,
-      direction: 0,
-      layerSpacing: 95
-    });
-    targetDiagram.layoutDiagram(true);
-  }, "auto layout");
-}
-
 function exportSvg() {
   if (!diagram) return;
   const svg = diagram.makeSvg({ background: "#eef1f5", scale: 1 });
@@ -971,6 +1283,30 @@ function createDiagram(el: HTMLDivElement) {
     }
   }
 
+  class PortAwareLinkingTool extends go.LinkingTool {
+    override doActivate() {
+      super.doActivate();
+      refreshPortVisibility();
+    }
+
+    override doDeactivate() {
+      super.doDeactivate();
+      refreshPortVisibility();
+    }
+  }
+
+  class PortAwareRelinkingTool extends go.RelinkingTool {
+    override doActivate() {
+      super.doActivate();
+      refreshPortVisibility();
+    }
+
+    override doDeactivate() {
+      super.doDeactivate();
+      refreshPortVisibility();
+    }
+  }
+
   const finishDrop = (event: GoJS.InputEvent) => {
     if (props.mode !== "edit") return;
     const ok = event.diagram.commandHandler.addTopLevelParts(event.diagram.selection, true);
@@ -984,10 +1320,7 @@ function createDiagram(el: HTMLDivElement) {
     "draggingTool.gridSnapCellSize": new go.Size(SNAP_GRID_SIZE, SNAP_GRID_SIZE),
     "draggingTool.gridSnapOrigin": new go.Point(0, 0),
     "draggingTool.isGridSnapEnabled": true,
-    "linkingTool.direction": go.LinkingTool.ForwardsOnly,
-    "linkingTool.portGravity": 32,
-    "relinkingTool.isEnabled": true,
-    "relinkingTool.portGravity": 32,
+    "resizingTool.cellSize": new go.Size(SNAP_GRID_SIZE, SNAP_GRID_SIZE),
     "resizingTool.isGridSnapEnabled": true,
     "rotatingTool.snapAngleMultiple": 15,
     "rotatingTool.snapAngleEpsilon": 7.5,
@@ -1007,7 +1340,7 @@ function createDiagram(el: HTMLDivElement) {
   next.grid =
     $(go.Panel, "Grid",
       {
-        gridCellSize: new go.Size(SNAP_GRID_SIZE, SNAP_GRID_SIZE),
+        gridCellSize: new go.Size(VISIBLE_GRID_SIZE, VISIBLE_GRID_SIZE),
         gridOrigin: new go.Point(0, 0),
         visible: props.mode === "edit"
       },
@@ -1017,6 +1350,14 @@ function createDiagram(el: HTMLDivElement) {
       $(go.Shape, "LineV", { interval: 5, stroke: "#c8d3e0", strokeWidth: 0.7 })
     );
   next.toolManager.linkReshapingTool = new SnapOrthogonalLinkReshapingTool();
+  const linkingTool = new PortAwareLinkingTool();
+  linkingTool.direction = go.LinkingTool.ForwardsOnly;
+  linkingTool.portGravity = 32;
+  next.toolManager.linkingTool = linkingTool;
+  const relinkingTool = new PortAwareRelinkingTool();
+  relinkingTool.isEnabled = true;
+  relinkingTool.portGravity = 32;
+  next.toolManager.relinkingTool = relinkingTool;
 
   const makeContextMenu = () =>
     $("ContextMenu",
@@ -1044,25 +1385,82 @@ function createDiagram(el: HTMLDivElement) {
       )
     );
 
-  const makePort = (side: PortSide, alignment: GoJS.Spot) =>
+  const makeLinkSelectionAdornment = () =>
+    $(go.Adornment, "Link",
+      $(go.Shape,
+        {
+          isPanelMain: true,
+          pickable: false,
+          stroke: "transparent",
+          strokeWidth: 1
+        }
+      ),
+      $(go.Shape,
+        {
+          fromArrow: "Circle",
+          fill: "#ffffff",
+          pickable: false,
+          scale: 0.85,
+          stroke: "#2563eb",
+          strokeWidth: 2
+        }
+      ),
+      $(go.Shape,
+        {
+          toArrow: "Circle",
+          fill: "#ffffff",
+          pickable: false,
+          scale: 0.85,
+          stroke: "#2563eb",
+          strokeWidth: 2
+        }
+      )
+    );
+
+  const makeRealPort = (side: PortSide) =>
     $(go.Shape, "Circle",
       {
         cursor: "crosshair",
-        desiredSize: new go.Size(12, 12),
+        desiredSize: new go.Size(PORT_SIZE, PORT_SIZE),
+        fill: "rgba(255, 255, 255, 0.001)",
+        stroke: null,
+        strokeWidth: 0,
+        alignment: toGoRealPortAlignment(side),
+        alignmentFocus: go.Spot.Center,
+        portId: side,
+        fromLinkable: false,
+        toLinkable: false,
+        fromMaxLinks: Infinity,
+        toMaxLinks: Infinity,
+        fromSpot: toGoSpot(side),
+        toSpot: toGoSpot(side),
+        opacity: 1,
+        pickable: false
+      },
+      new go.Binding("fromSpot", "__ports", (ports: DiagramPortData[] | undefined) => toGoSpot(portForSide(ports, side)?.side ?? side)),
+      new go.Binding("toSpot", "__ports", (ports: DiagramPortData[] | undefined) => toGoSpot(portForSide(ports, side)?.side ?? side))
+    );
+
+  const makeVisualPort = (side: PortSide, alignment: GoJS.Spot) =>
+    $(go.Shape, "Circle",
+      {
+        name: portVisualName(side),
+        cursor: "crosshair",
+        desiredSize: new go.Size(PORT_SIZE, PORT_SIZE),
         fill: "#ffffff",
         stroke: "#0f766e",
         strokeWidth: 2,
         alignment,
         alignmentFocus: go.Spot.Center,
-        portId: side,
-        fromLinkable: props.mode === "edit",
-        toLinkable: props.mode === "edit",
+        portId: visualPortId(side),
+        fromLinkable: false,
+        toLinkable: false,
         fromMaxLinks: Infinity,
         toMaxLinks: Infinity,
         fromSpot: toGoSpot(side),
         toSpot: toGoSpot(side),
-        opacity: props.mode === "edit" ? 1 : 0,
-        pickable: props.mode === "edit",
+        opacity: 0,
+        pickable: false,
         toolTip:
           $("ToolTip",
             $(go.TextBlock,
@@ -1070,22 +1468,22 @@ function createDiagram(el: HTMLDivElement) {
               new go.Binding("text", "__ports", (ports: DiagramPortData[] | undefined) => portLabelForSide(ports, side))
             )
           )
-      },
-      new go.Binding("opacity", "__ports", (ports: DiagramPortData[] | undefined) => props.mode === "edit" && !!portForSide(ports, side) ? 1 : 0),
-      new go.Binding("pickable", "__ports", (ports: DiagramPortData[] | undefined) => props.mode === "edit" && !!portForSide(ports, side)),
-      new go.Binding("fromSpot", "__ports", (ports: DiagramPortData[] | undefined) => toGoSpot(portForSide(ports, side)?.side ?? side)),
-      new go.Binding("toSpot", "__ports", (ports: DiagramPortData[] | undefined) => toGoSpot(portForSide(ports, side)?.side ?? side))
+      }
     );
 
   const fixedPorts = [
-    makePort("top", new go.Spot(0.5, 0, 0, -14)),
-    makePort("right", new go.Spot(1, 0.5, 14, 0)),
-    makePort("bottom", new go.Spot(0.5, 1, 0, 14)),
-    makePort("left", new go.Spot(0, 0.5, -14, 0))
+    makeRealPort("top"),
+    makeRealPort("right"),
+    makeRealPort("bottom"),
+    makeRealPort("left"),
+    makeVisualPort("top", new go.Spot(0.5, 0, 0, -PORT_VISUAL_OFFSET)),
+    makeVisualPort("right", new go.Spot(1, 0.5, PORT_VISUAL_OFFSET, 0)),
+    makeVisualPort("bottom", new go.Spot(0.5, 1, 0, PORT_VISUAL_OFFSET)),
+    makeVisualPort("left", new go.Spot(0, 0.5, -PORT_VISUAL_OFFSET, 0))
   ];
 
-  const shouldShowToArrow = (link: DiagramLinkData) => link.showArrow !== false && (link.direction ?? "forward") !== "reverse";
-  const shouldShowFromArrow = (link: DiagramLinkData) => link.showArrow !== false && ["reverse", "both"].includes(link.direction ?? "forward");
+  const shouldShowToArrow = (link: DiagramLinkData) => link.showArrow === true && (link.direction ?? "forward") !== "reverse";
+  const shouldShowFromArrow = (link: DiagramLinkData) => link.showArrow === true && ["reverse", "both"].includes(link.direction ?? "forward");
 
   next.nodeTemplate =
     $(go.Node, "Spot",
@@ -1253,6 +1651,8 @@ function createDiagram(el: HTMLDivElement) {
           alignmentFocus: go.Spot.Top,
           background: "transparent"
         },
+        new go.Binding("alignment", "labelPosition", toGoLabelAlignment),
+        new go.Binding("alignmentFocus", "labelPosition", toGoLabelAlignmentFocus),
         new go.Binding("visible", "", shouldShowNodeLabel),
         $(go.TextBlock,
           {
@@ -1340,8 +1740,9 @@ function createDiagram(el: HTMLDivElement) {
     $(go.Link,
       {
         contextMenu: makeContextMenu(),
+        adjusting: go.Link.End,
         layerName: "",
-        routing: go.Link.AvoidsNodes,
+        routing: go.Link.Orthogonal,
         curve: go.Link.None,
         corner: 0,
         fromEndSegmentLength: 14,
@@ -1350,6 +1751,7 @@ function createDiagram(el: HTMLDivElement) {
         resegmentable: true,
         reshapable: true,
         selectable: props.mode === "edit",
+        selectionAdornmentTemplate: makeLinkSelectionAdornment(),
         toEndSegmentLength: 14,
         zOrder: 0
       },
@@ -1358,13 +1760,46 @@ function createDiagram(el: HTMLDivElement) {
       new go.Binding("zOrder", "", resolveLinkZOrder),
       $(go.Shape,
         {
+          name: "EDIT_PATH",
+          fill: null,
+          isPanelMain: true,
+          pickable: false,
+          stroke: "transparent",
+          strokeWidth: 1
+        }
+      ),
+      $(go.Shape,
+        {
+          name: "GLOW",
+          fill: null,
+          isPanelMain: true,
+          opacity: 0.28,
+          pickable: false,
+          stroke: "#42B0FF",
+          strokeCap: "round",
+          strokeJoin: "round",
+          strokeWidth: 10
+        },
+        new go.Binding("visible", "", resolveLinkGlowVisible),
+        new go.Binding("stroke", "", resolveLinkGlowColor),
+        new go.Binding("strokeWidth", "", resolveLinkGlowWidth),
+        new go.Binding("opacity", "", resolveLinkGlowOpacity),
+        new go.Binding("strokeDashArray", "", resolveLinkDash)
+      ),
+      $(go.Shape,
+        {
           isPanelMain: true,
           stroke: "#42B0FF",
+          strokeCap: "butt",
+          strokeJoin: "miter",
           strokeWidth: 2
         },
         new go.Binding("stroke", "", resolveLinkColor),
         new go.Binding("strokeWidth", "", resolveLinkWidth),
-        new go.Binding("strokeDashArray", "defaultStyle", (style) => style?.dash || null)
+        new go.Binding("opacity", "", resolveLinkOpacity),
+        new go.Binding("strokeCap", "", resolveLinkLineCap),
+        new go.Binding("strokeJoin", "", (link: DiagramLinkData) => resolveLinkLineCap(link) === "round" ? "round" : "miter"),
+        new go.Binding("strokeDashArray", "", resolveLinkDash)
       ),
       $(go.Shape,
         {
@@ -1378,9 +1813,11 @@ function createDiagram(el: HTMLDivElement) {
           strokeWidth: 3
         },
         new go.Binding("visible", "", resolveLinkAnimated),
-        new go.Binding("stroke", "", resolveLinkColor),
+        new go.Binding("stroke", "", resolveFlowLinkColor),
+        new go.Binding("opacity", "", resolveFlowLinkOpacity),
         new go.Binding("strokeDashArray", "", resolveFlowLinkDash),
-        new go.Binding("strokeWidth", "", resolveFlowLinkWidth)
+        new go.Binding("strokeWidth", "", resolveFlowLinkWidth),
+        new go.Binding("strokeCap", "", resolveLinkLineCap)
       ),
       $(go.Shape,
         { fromArrow: "Standard", stroke: null, fill: "#42B0FF" },
@@ -1418,28 +1855,28 @@ function createDiagram(el: HTMLDivElement) {
     const model = next.model as GoJS.GraphLinksModel;
 
     model.commit((m) => {
+      const normalizedFromPort = normalizePortId(link.data.fromPort);
+      const normalizedToPort = normalizePortId(link.data.toPort);
+      const nextDefaultState = link.data.defaultState ?? linkCreationDefaults.defaultState;
+      const nextDefaultStyle = link.data.defaultStyle
+        ? cloneLinkStyle(link.data.defaultStyle)
+        : cloneLinkStyle(linkCreationDefaults.defaultStyle);
+      if (normalizedFromPort !== link.data.fromPort) m.setDataProperty(link.data, "fromPort", normalizedFromPort);
+      if (normalizedToPort !== link.data.toPort) m.setDataProperty(link.data, "toPort", normalizedToPort);
       if (!link.data.key) m.setDataProperty(link.data, "key", createLinkKey(model));
-      if (!link.data.direction) m.setDataProperty(link.data, "direction", "forward");
-      if (link.data.showArrow === undefined) m.setDataProperty(link.data, "showArrow", true);
-      if (!link.data.linkType) m.setDataProperty(link.data, "linkType", "power-line");
-      if (!link.data.defaultState) m.setDataProperty(link.data, "defaultState", "off");
+      if (!link.data.direction) m.setDataProperty(link.data, "direction", linkCreationDefaults.direction);
+      if (link.data.showArrow === undefined) m.setDataProperty(link.data, "showArrow", linkCreationDefaults.showArrow);
+      if (!link.data.linkType) m.setDataProperty(link.data, "linkType", linkCreationDefaults.linkType);
+      if (!link.data.defaultState) m.setDataProperty(link.data, "defaultState", nextDefaultState);
       if (!link.data.defaultStyle) {
-        m.setDataProperty(link.data, "defaultStyle", {
-          color: "#42B0FF",
-          width: 2,
-          animated: false,
-          flowDirection: "fromTo"
-        });
+        m.setDataProperty(link.data, "defaultStyle", nextDefaultStyle);
       }
       if (!link.data.runtime) {
-        m.setDataProperty(link.data, "runtime", {
-          state: "off",
-          color: "#42B0FF",
-          width: 2,
-          animated: false
-        });
+        m.setDataProperty(link.data, "runtime", buildDefaultLinkRuntime(nextDefaultStyle, nextDefaultState));
       }
     }, "normalize link data");
+    link.invalidateRoute();
+    link.updateRoute();
   };
 
   const syncLinkRoute = (link: GoJS.Link) => {
@@ -1461,6 +1898,7 @@ function createDiagram(el: HTMLDivElement) {
   next.addDiagramListener("LinkReshaped", (event) => syncLinkRoute(event.subject as GoJS.Link));
 
   next.addDiagramListener("ChangedSelection", () => {
+    refreshPortVisibility();
     if (applyingModel) return;
     const part = next.selection.first();
     emit("selectionChange", part instanceof go.Node || part instanceof go.Link ? (part.data.key ?? "") : "");
@@ -1521,14 +1959,18 @@ function startFlowAnimation() {
   stopFlowAnimation();
   flowTimer = window.setInterval(() => {
     if (!diagram) return;
-    flowOffset = (flowOffset + 1) % 36;
+    flowOffset = (flowOffset + 1) % 100000;
+    let shouldRefreshFlow = false;
     diagram.links.each((link) => {
       const flow = link.findObject("FLOW") as GoJS.Shape | null;
       if (!flow || !link.data || !resolveLinkAnimated(link.data)) return;
-      const direction = resolveLinkFlowDirection(link.data);
-      const sign = direction === "toFrom" ? -1 : 1;
-      flow.strokeDashOffset = direction === "both" ? flowOffset : flowOffset * sign;
+      const speed = resolveFlowLinkSpeed(link.data);
+      const offset = speed === 0 ? 0 : flowOffset * speed;
+      const nextOffset = resolveFlowDashOffset(link.data, offset);
+      if (speed > 0 || flow.strokeDashOffset !== nextOffset) shouldRefreshFlow = true;
+      flow.strokeDashOffset = nextOffset;
     });
+    if (shouldRefreshFlow) diagram.requestUpdate();
   }, 90);
 }
 

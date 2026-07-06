@@ -12,9 +12,24 @@ export type Condition = {
 export type LinkStyle = {
   color?: string;
   width?: number;
+  opacity?: number;
+  lineCap?: "butt" | "round" | "square";
   animated?: boolean;
   flowDirection?: "fromTo" | "toFrom" | "both";
   dash?: number[];
+  flow?: {
+    color?: string;
+    width?: number;
+    opacity?: number;
+    dash?: number[];
+    speed?: number;
+  };
+  glow?: {
+    enabled?: boolean;
+    color?: string;
+    width?: number;
+    opacity?: number;
+  };
 };
 
 export type LinkRuntimeRule = {

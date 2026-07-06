@@ -37,6 +37,7 @@ export const topologyNodeSchema = z.object({
   key: z.string().min(1),
   typeId: z.string().min(1),
   label: z.string().min(1),
+  labelPosition: z.enum(["top", "right", "bottom", "left"]).optional(),
   loc: z.string().default("0 0"),
   size: z.string().optional(),
   angle: z.number().optional(),

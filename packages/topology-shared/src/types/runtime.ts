@@ -1,3 +1,5 @@
+import type { LinkStyle } from "./rule";
+
 export type RuntimeVisibility = {
   ruleVisible?: boolean;
   externalVisible?: boolean;
@@ -21,8 +23,13 @@ export type LinkRuntime = {
   state?: string;
   color?: string;
   width?: number;
+  opacity?: number;
+  lineCap?: LinkStyle["lineCap"];
   animated?: boolean;
   flowDirection?: "fromTo" | "toFrom" | "both";
+  dash?: number[];
+  flow?: LinkStyle["flow"];
+  glow?: LinkStyle["glow"];
   visibility?: RuntimeVisibility;
 };
 
