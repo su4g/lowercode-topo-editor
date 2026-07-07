@@ -28,6 +28,7 @@ const eventContext = computed(() => {
   };
 });
 const isPreview = computed(() => route.query.preview === "1");
+const isDebugRuntime = computed(() => isPreview.value || route.query.debug === "1");
 const previewApiDialogVisible = ref(false);
 const previewMockTexts = ref<Record<string, string>>({});
 const previewApplying = ref(false);
@@ -116,7 +117,7 @@ function handleCanvasEvent(event: TopologyEvent) {
   if ("nodeKey" in event) selectedKey.value = event.nodeKey;
   if (event.type === "LINK_CLICK") selectedKey.value = event.linkKey;
 
-  if (!isPreview.value || event.type !== "NODE_EVENT") return;
+  if (!isDebugRuntime.value || event.type !== "NODE_EVENT") return;
   previewEventLogs.value = [
     {
       id: `${Date.now()}_${Math.round(Math.random() * 1000)}`,
@@ -214,7 +215,7 @@ function collectRuntimeQuery(data: TopologyData) {
 
   for (const node of data.nodes) {
     if (!node.dataBinding?.enabled || !node.dataBinding.sourceId) continue;
-    if (!isPreview.value && isWebSocketSource(data, node.dataBinding.sourceId)) continue;
+    if (!isDebugRuntime.value && isWebSocketSource(data, node.dataBinding.sourceId)) continue;
     sourceIds.add(node.dataBinding.sourceId);
     for (const field of Object.values(node.dataBinding.mappings ?? {})) fields.add(field);
   }
@@ -233,7 +234,7 @@ function collectRuntimeQuery(data: TopologyData) {
       }
       if (!shouldQueryRuntimeField(data, target, metaData)) continue;
       if (data.dataSources?.some((source) => source.sourceId === target)) {
-        if (!isPreview.value && isWebSocketSource(data, target)) continue;
+        if (!isDebugRuntime.value && isWebSocketSource(data, target)) continue;
         sourceIds.add(target);
         shouldQueryFullPayload = true;
         continue;
@@ -259,7 +260,7 @@ function collectRuntimeQuery(data: TopologyData) {
         if (!shouldQueryRuntimeField(data, target, metaData)) continue;
         const ruleNode = data.nodes.find((item) => item.key === target);
         if (ruleNode?.dataBinding?.sourceId) {
-          if (!isPreview.value && isWebSocketSource(data, ruleNode.dataBinding.sourceId)) continue;
+          if (!isDebugRuntime.value && isWebSocketSource(data, ruleNode.dataBinding.sourceId)) continue;
           sourceIds.add(ruleNode.dataBinding.sourceId);
           fields.add(ruleNode.dataBinding.mappings?.[fieldName] ?? fieldName);
           continue;
@@ -270,7 +271,7 @@ function collectRuntimeQuery(data: TopologyData) {
           shouldQueryFullPayload = true;
           continue;
         }
-        if (!isPreview.value && isWebSocketSource(data, target)) continue;
+        if (!isDebugRuntime.value && isWebSocketSource(data, target)) continue;
         sourceIds.add(target);
         shouldQueryFullPayload = true;
       }
@@ -292,7 +293,7 @@ function collectRuntimeQuery(data: TopologyData) {
         if (!shouldQueryRuntimeField(data, target, metaData)) continue;
         const node = data.nodes.find((item) => item.key === target);
         if (node?.dataBinding?.sourceId) {
-          if (!isPreview.value && isWebSocketSource(data, node.dataBinding.sourceId)) continue;
+          if (!isDebugRuntime.value && isWebSocketSource(data, node.dataBinding.sourceId)) continue;
           sourceIds.add(node.dataBinding.sourceId);
           fields.add(node.dataBinding.mappings?.[fieldName] ?? fieldName);
           continue;
@@ -303,7 +304,7 @@ function collectRuntimeQuery(data: TopologyData) {
           shouldQueryFullPayload = true;
           continue;
         }
-        if (!isPreview.value && isWebSocketSource(data, target)) continue;
+        if (!isDebugRuntime.value && isWebSocketSource(data, target)) continue;
         sourceIds.add(target);
         shouldQueryFullPayload = true;
       }
@@ -638,7 +639,7 @@ function closeWebSocketSources() {
 function openWebSocketSources() {
   closeWebSocketSources();
   const base = currentTemplateTopology();
-  if (!base || isPreview.value) return;
+  if (!base || isDebugRuntime.value) return;
   const metaData = readExpressionMetaData();
   const context = {
     ...metaData,
@@ -722,7 +723,7 @@ async function refreshRuntime() {
 
   lastHttpRuntime = query.sourceIds.length
     ? await queryRuntime(base.id, query.sourceIds, query.fields, {
-      preview: isPreview.value,
+      preview: isDebugRuntime.value,
       parentParams: metaData,
       metaData,
       sources: base.dataSources
@@ -736,7 +737,7 @@ async function refreshRuntime() {
 
 function runtimePollingInterval() {
   const intervals = (currentTemplateTopology()?.dataSources ?? [])
-    .filter((source) => source.enabled !== false && (isPreview.value || source.type !== "websocket"))
+    .filter((source) => source.enabled !== false && (isDebugRuntime.value || source.type !== "websocket"))
     .map((source) => source.config?.interval ?? 3000)
     .filter((interval) => interval > 0);
   return intervals.length ? Math.min(...intervals) : 0;
@@ -750,9 +751,9 @@ onMounted(async () => {
     return;
   }
 
-  const loadedTopology = isPreview.value ? readPreviewTopology(id) : await getTopology(id);
+  const loadedTopology = (isPreview.value ? readPreviewTopology(id) : null) ?? await getTopology(id);
   if (!loadedTopology) {
-    ElMessage.warning(isPreview.value ? "预览数据不存在，请从编辑器重新进入预览" : "拓扑不存在，请先在编辑器保存");
+    ElMessage.warning("拓扑不存在，请先在编辑器保存");
     return;
   }
   templateTopology.value = cloneTopology(loadedTopology);
@@ -773,17 +774,17 @@ onBeforeUnmount(() => {
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <span class="topbar-title">{{ isPreview ? "拓扑预览" : "拓扑运行态" }}</span>
+      <span class="topbar-title">拓扑调试运行页</span>
       <ModuleNav />
       <span class="topbar-spacer" />
-      <el-button v-if="!isPreview" @click="router.push('/runtime-list')">返回展示列表</el-button>
-      <el-button v-if="isPreview" :disabled="!topology" @click="openPreviewApiDialog">接口预览测试</el-button>
+      <el-button v-if="!isPreview" @click="router.push('/runtime-list')">返回调试运行列表</el-button>
+      <el-button v-if="isDebugRuntime" :disabled="!topology" @click="openPreviewApiDialog">接口调试</el-button>
       <el-button :disabled="!topology" @click="router.push(`/topologies/${topology?.id}/editor`)">编辑</el-button>
       <el-button @click="refreshRuntime">刷新数据</el-button>
     </header>
     <section
       class="workspace"
-      :style="{ gridTemplateColumns: isPreview ? '0 minmax(0, 1fr) 360px' : '0 minmax(0, 1fr) 300px' }"
+      :style="{ gridTemplateColumns: isDebugRuntime ? '0 minmax(0, 1fr) 360px' : '0 minmax(0, 1fr) 300px' }"
     >
       <div />
       <div class="canvas-wrap">
@@ -798,7 +799,7 @@ onBeforeUnmount(() => {
         />
       </div>
       <aside class="runtime-right-panel">
-        <section v-if="isPreview" class="preview-event-log">
+        <section v-if="isDebugRuntime" class="preview-event-log">
           <div class="preview-event-log-header">
             <div>
               <div class="preview-event-log-title">事件日志</div>
@@ -861,7 +862,7 @@ onBeforeUnmount(() => {
           </template>
           <template v-else>
             <div class="runtime-inspector-title">{{ topology?.name ?? "拓扑" }}</div>
-            <div class="runtime-inspector-kind">{{ isPreview ? "预览态" : "运行态" }}</div>
+            <div class="runtime-inspector-kind">调试运行态</div>
             <div class="runtime-inspector-grid">
               <span>节点</span>
               <strong>{{ topology?.nodes.length ?? 0 }}</strong>
@@ -870,16 +871,16 @@ onBeforeUnmount(() => {
               <span>版本</span>
               <strong>{{ topology?.version ?? "-" }}</strong>
             </div>
-            <div class="runtime-inspector-empty">点击画布中的节点或连线查看运行态详情。</div>
+            <div class="runtime-inspector-empty">点击画布中的节点或连线查看调试运行详情。</div>
           </template>
         </section>
       </aside>
     </section>
-    <el-dialog v-model="previewApiDialogVisible" title="接口预览测试" width="980px" class="preview-api-dialog">
+    <el-dialog v-model="previewApiDialogVisible" title="接口调试" width="980px" class="preview-api-dialog">
       <div class="preview-api-header">
         <div>
           <div class="preview-api-title">Mock 数据</div>
-          <div class="preview-api-hint">修改后点击应用刷新，预览态会重新计算节点与连线规则。</div>
+          <div class="preview-api-hint">修改后点击应用刷新，调试运行页会重新计算节点与连线规则。</div>
         </div>
         <div class="preview-api-actions">
           <el-button @click="resetPreviewMockDrafts">重置草稿</el-button>

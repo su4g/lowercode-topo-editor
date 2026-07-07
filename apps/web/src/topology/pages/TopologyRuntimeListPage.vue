@@ -18,7 +18,7 @@ async function load() {
 }
 
 async function openRuntime(row: TopologySummary) {
-  await router.push(`/runtime/${row.id}`);
+  await router.push(`/runtime/${row.id}?debug=1`);
 }
 
 async function openEditor(row: TopologySummary) {
@@ -31,7 +31,7 @@ onMounted(load);
 <template>
   <main class="module-page">
     <header class="topbar">
-      <span class="topbar-title">拓扑展示态列表</span>
+      <span class="topbar-title">拓扑调试运行列表</span>
       <ModuleNav />
       <span class="topbar-spacer" />
       <el-button @click="load">刷新</el-button>
@@ -41,8 +41,8 @@ onMounted(load);
       <div class="module-card">
         <div class="module-card-header">
           <div>
-            <div class="module-card-title">可展示拓扑</div>
-            <div class="module-card-subtitle">打开运行态页面，按实时数据刷新文本、状态和规则结果</div>
+            <div class="module-card-title">可调试拓扑</div>
+            <div class="module-card-subtitle">打开调试运行页，验证接口数据、节点状态、规则结果和点击事件日志</div>
           </div>
         </div>
 
@@ -58,7 +58,7 @@ onMounted(load);
           <el-table-column prop="updatedAt" label="更新时间" min-width="180" />
           <el-table-column label="操作" width="210" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" @click="openRuntime(row)">打开展示态</el-button>
+              <el-button link type="primary" @click="openRuntime(row)">打开调试运行页</el-button>
               <el-button link @click="openEditor(row)">编辑</el-button>
             </template>
           </el-table-column>

@@ -7,7 +7,7 @@ const router = useRouter();
 
 const items = [
   { label: "拓扑编辑", path: "/topologies", match: (path: string) => path === "/topologies" || path.startsWith("/topologies/") },
-  { label: "展示态列表", path: "/runtime-list", match: (path: string) => path === "/runtime-list" || path.startsWith("/runtime/") },
+  { label: "调试运行", path: "/runtime-list", match: (path: string) => path === "/runtime-list" || path.startsWith("/runtime/") },
   { label: "节点库管理", path: "/node-types", match: (path: string) => path === "/node-types" }
 ];
 
