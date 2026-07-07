@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ModuleNav from "../components/ModuleNav.vue";
+import ObjectNavigator from "../components/ObjectNavigator/index.vue";
 import PalettePanel from "../components/PalettePanel/index.vue";
 import PropertyPanel from "../components/PropertyPanel/index.vue";
 import TopologyCanvas from "../components/TopologyCanvas/index.vue";
@@ -17,6 +18,7 @@ const topology = ref<TopologyData | null>(null);
 const saving = ref(false);
 const selectedKey = ref("");
 const apiDialogVisible = ref(false);
+const objectNavigatorVisible = ref(false);
 const canvasRef = ref<{
   exportTopology: () => TopologyData | null;
   updateNodeDataFromProps: (nodeKey: string, patch: Partial<TopologyNode>) => void;
@@ -60,6 +62,52 @@ function getDefaultSize(nodeType: NodeTypeDefinition) {
   if (nodeType.category === "annotation") return { width: 140, height: 64 };
   if (nodeType.category === "control") return { width: 112, height: 42 };
   return { width: 104, height: 92 };
+}
+
+function formSchemaDefaultProps(nodeType: NodeTypeDefinition) {
+  return Object.fromEntries((nodeType.formSchema ?? []).map((field) => [field.field, field.defaultValue ?? ""]));
+}
+
+function nodeTypeDefaultProps(nodeType: NodeTypeDefinition) {
+  const props: Record<string, unknown> = formSchemaDefaultProps(nodeType);
+
+  if (nodeType.category === "annotation") {
+    props.textColor = nodeType.annotationDefaults?.textColor ?? props.textColor ?? "#111827";
+    props.textSize = nodeType.annotationDefaults?.textSize ?? props.textSize ?? 14;
+  }
+
+  if (nodeType.category === "control" || nodeType.template === "buttonTemplate") {
+    props.buttonText = nodeType.buttonDefaults?.buttonText ?? props.buttonText ?? "按钮";
+    props.buttonRenderMode = nodeType.buttonDefaults?.buttonRenderMode ?? props.buttonRenderMode ?? "text";
+    props.icon = nodeType.buttonDefaults?.icon ?? nodeType.icon ?? props.icon ?? "";
+    props.buttonDefaultVisible = nodeType.buttonDefaults?.buttonDefaultVisible ?? props.buttonDefaultVisible ?? true;
+    if (props.buttonRenderMode !== "image") {
+      props.buttonStyleBackgroundColor = nodeType.buttonStyleDefaults?.backgroundColor ?? "#eff6ff";
+      props.buttonStyleBorderColor = nodeType.buttonStyleDefaults?.borderColor ?? "#2563eb";
+      props.buttonStyleTextColor = nodeType.buttonStyleDefaults?.textColor ?? "#1d4ed8";
+      props.buttonStyleTextSize = nodeType.buttonStyleDefaults?.textSize ?? 13;
+      props.buttonStyleBorderWidth = nodeType.buttonStyleDefaults?.borderWidth ?? 1.5;
+      props.buttonStyleBorderRadius = nodeType.buttonStyleDefaults?.borderRadius ?? 6;
+      props.buttonStylePaddingX = nodeType.buttonStyleDefaults?.paddingX ?? 10;
+      props.buttonStylePaddingY = nodeType.buttonStyleDefaults?.paddingY ?? 5;
+    }
+  }
+
+  if (nodeType.isGroup || nodeType.category === "container") {
+    props.backgroundOpacity = nodeType.groupStyleDefaults?.backgroundOpacity ?? props.backgroundOpacity ?? 100;
+    props.transparentBackground = nodeType.groupStyleDefaults?.transparentBackground ?? props.transparentBackground ?? false;
+    props.dashedBorder = nodeType.groupStyleDefaults?.dashedBorder ?? props.dashedBorder ?? false;
+  }
+
+  return props;
+}
+
+function defaultNodeRuntime(nodeType: NodeTypeDefinition) {
+  if (!nodeType.isGroup && nodeType.category !== "container") return {};
+  return {
+    backgroundColor: nodeType.groupStyleDefaults?.backgroundColor ?? "#eef6ff",
+    borderColor: nodeType.groupStyleDefaults?.borderColor ?? "#3b82f6"
+  };
 }
 
 function normalizeNodeSizes(data: TopologyData) {
@@ -206,7 +254,7 @@ function addNode(payload: { nodeType: NodeTypeDefinition; loc?: string; groupKey
   const { nodeType, loc, groupKey } = payload;
   const index = topology.value.nodes.filter((node) => node.typeId === nodeType.id).length + 1;
   const key = `${nodeType.id}_${String(index).padStart(3, "0")}`;
-  const props = Object.fromEntries((nodeType.formSchema ?? []).map((field) => [field.field, field.defaultValue ?? ""]));
+  const props = nodeTypeDefaultProps(nodeType);
   const size = getDefaultSize(nodeType);
   const targetGroup = canDropIntoGroup(nodeType, groupKey) ? groupKey : undefined;
   const zOrder = Math.max(0, ...topology.value.nodes.map((node) => Number.isFinite(node.zOrder) ? Number(node.zOrder) : 0)) + 1;
@@ -226,9 +274,7 @@ function addNode(payload: { nodeType: NodeTypeDefinition; loc?: string; groupKey
         zOrder,
         group: targetGroup,
         props,
-        runtime: nodeType.isGroup
-          ? { backgroundColor: "#eef6ff", borderColor: "#3b82f6" }
-          : {}
+        runtime: defaultNodeRuntime(nodeType)
       }
     ]
   };
@@ -244,6 +290,14 @@ function updateTopology(next: TopologyData) {
   ) {
     selectedKey.value = "";
   }
+}
+
+function updateTopologyMeta(patch: Partial<TopologyData>) {
+  if (!topology.value) return;
+  topology.value = {
+    ...topology.value,
+    ...patch
+  };
 }
 
 function updateNode(key: string, patch: Partial<TopologyNode>) {
@@ -362,6 +416,7 @@ onMounted(async () => {
       <el-button :disabled="!topology" @click="redo">重做</el-button>
       <el-button :disabled="!topology" @click="fitView">适配</el-button>
       <el-button :disabled="!topology" type="danger" plain @click="deleteSelection">删除</el-button>
+      <el-button :disabled="!topology" @click="objectNavigatorVisible = !objectNavigatorVisible">对象树</el-button>
       <el-button :disabled="!topology" @click="apiDialogVisible = true">接口配置</el-button>
       <el-button :disabled="!topology" @click="exportSvg">导出 SVG</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -381,6 +436,14 @@ onMounted(async () => {
           @drop-node="addNode"
           @selection-change="selectedKey = $event"
         />
+        <ObjectNavigator
+          v-if="objectNavigatorVisible"
+          :topology="topology"
+          :node-types="nodeTypes"
+          :selected-key="selectedKey"
+          @close="objectNavigatorVisible = false"
+          @select-item="selectedKey = $event"
+        />
       </div>
       <PropertyPanel
         class="right-panel"
@@ -388,6 +451,7 @@ onMounted(async () => {
         :node-types="nodeTypes"
         :selected-node="selectedNode"
         :selected-link="selectedLink"
+        @update-topology="updateTopologyMeta"
         @update-node="updateNode"
         @update-link="updateLink"
         @select-item="selectedKey = $event"

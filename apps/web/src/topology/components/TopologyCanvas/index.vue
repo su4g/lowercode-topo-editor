@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import "../../../core/go.js";
 import type * as GoJS from "gojs";
-import { getNodePorts, readExpressionPath, resolveExpressionValue, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeTypeDefinition, type PortDefinition, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { defaultNodePorts, normalizeExpressionPath, readExpressionPath, resolveExpressionValue, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeTypeDefinition, type PortDefinition, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const props = defineProps<{
@@ -72,6 +72,7 @@ type DiagramNodeData = TopologyNode & {
   __iconText?: string;
   __hasImageIcon?: boolean;
   __isAnnotation?: boolean;
+  __isContainer?: boolean;
   __isControl?: boolean;
   __ports?: DiagramPortData[];
 };
@@ -180,11 +181,12 @@ function normalizePointArray(points: unknown): SerializablePoint[] | undefined {
 
 function stripDiagramNodeData(nodes: DiagramNodeData[]): TopologyData["nodes"] {
   return nodes.map((node) => {
-    const { __hasImageIcon, __icon, __iconText, __isAnnotation, __isControl, __ports, ...topologyNode } = node;
+    const { __hasImageIcon, __icon, __iconText, __isAnnotation, __isContainer, __isControl, __ports, ...topologyNode } = node;
     void __hasImageIcon;
     void __icon;
     void __iconText;
     void __isAnnotation;
+    void __isContainer;
     void __isControl;
     void __ports;
     return topologyNode;
@@ -235,12 +237,14 @@ function normalizeNodeStatus(status?: string) {
 
 function resolveNodeIcon(node: TopologyNode) {
   const nodeType = nodeTypeOf(node.typeId);
-  const statusIcon = nodeType?.statusImages?.[normalizeNodeStatus(node.runtime?.status)];
+  const statusIcon = nodeType?.category === "equipment"
+    ? nodeType.statusImages?.[normalizeNodeStatus(node.runtime?.status)]
+    : undefined;
   const propsIcon = typeof node.props?.icon === "string" ? node.props.icon : undefined;
   const directIcon = typeof (node as TopologyNode & { icon?: unknown }).icon === "string"
     ? (node as TopologyNode & { icon?: string }).icon
     : undefined;
-  const icon = statusIcon || propsIcon || directIcon || nodeType?.icon || "";
+  const icon = statusIcon || propsIcon || directIcon || nodeType?.buttonDefaults?.icon || nodeType?.icon || "";
   return normalizeIcon(icon);
 }
 
@@ -251,6 +255,11 @@ function resolveIconText(node: TopologyNode, icon: string) {
 
 function isAnnotationNode(node: TopologyNode) {
   return nodeTypeOf(node.typeId)?.category === "annotation";
+}
+
+function isContainerNode(node: TopologyNode) {
+  const nodeType = nodeTypeOf(node.typeId);
+  return node.isGroup === true || nodeType?.category === "container" || nodeType?.isGroup === true;
 }
 
 function isControlNode(node: TopologyNode) {
@@ -267,33 +276,89 @@ function resolveAnnotationText(node: DiagramNodeData) {
 
 function resolveAnnotationTextColor(node: DiagramNodeData) {
   const color = node.props?.textColor;
-  return typeof color === "string" && color.trim() ? color : "#111827";
+  if (typeof color === "string" && color.trim()) return color;
+  return nodeTypeOf(node.typeId)?.annotationDefaults?.textColor ?? "#111827";
 }
 
 function resolveAnnotationTextFont(node: DiagramNodeData) {
   const size = Number(node.props?.textSize);
-  const fontSize = Number.isFinite(size) && size > 0 ? Math.round(size) : 14;
+  const defaultSize = nodeTypeOf(node.typeId)?.annotationDefaults?.textSize ?? 14;
+  const fontSize = Number.isFinite(size) && size > 0 ? Math.round(size) : Math.round(defaultSize);
   return `${fontSize}px sans-serif`;
 }
 
 function controlRenderMode(node: DiagramNodeData) {
   const mode = node.props?.buttonRenderMode;
-  return mode === "image" || mode === "imageText" || mode === "text" ? mode : "text";
+  if (mode === "image" || mode === "imageText" || mode === "text") return mode;
+  const defaultMode = nodeTypeOf(node.typeId)?.buttonDefaults?.buttonRenderMode;
+  return defaultMode === "image" || defaultMode === "imageText" || defaultMode === "text" ? defaultMode : "text";
 }
 
 function resolveControlText(node: DiagramNodeData) {
   const text = node.props?.buttonText;
-  return typeof text === "string" && text.trim() ? text : node.label;
+  if (typeof text === "string" && text.trim()) return text;
+  return nodeTypeOf(node.typeId)?.buttonDefaults?.buttonText ?? node.label;
+}
+
+function numberProp(node: DiagramNodeData, field: string, fallback: number) {
+  const value = Number(node.props?.[field]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function stringProp(node: DiagramNodeData, field: string, fallback: string) {
+  const value = node.props?.[field];
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function resolveControlFill(node: DiagramNodeData) {
+  return stringProp(node, "buttonStyleBackgroundColor", nodeTypeOf(node.typeId)?.buttonStyleDefaults?.backgroundColor ?? "#eff6ff");
+}
+
+function resolveControlStroke(node: DiagramNodeData) {
+  return stringProp(node, "buttonStyleBorderColor", nodeTypeOf(node.typeId)?.buttonStyleDefaults?.borderColor ?? "#2563eb");
+}
+
+function resolveControlStrokeWidth(node: DiagramNodeData) {
+  return Math.max(0, numberProp(node, "buttonStyleBorderWidth", nodeTypeOf(node.typeId)?.buttonStyleDefaults?.borderWidth ?? 1.5));
+}
+
+function resolveControlCorner(node: DiagramNodeData) {
+  return Math.max(0, Math.round(numberProp(node, "buttonStyleBorderRadius", nodeTypeOf(node.typeId)?.buttonStyleDefaults?.borderRadius ?? 6)));
+}
+
+function resolveControlTextStroke(node: DiagramNodeData) {
+  return stringProp(node, "buttonStyleTextColor", nodeTypeOf(node.typeId)?.buttonStyleDefaults?.textColor ?? "#1d4ed8");
+}
+
+function resolveControlTextFont(node: DiagramNodeData) {
+  const fontSize = Math.max(1, Math.round(numberProp(node, "buttonStyleTextSize", nodeTypeOf(node.typeId)?.buttonStyleDefaults?.textSize ?? 13)));
+  return `600 ${fontSize}px sans-serif`;
+}
+
+function resolveControlContentMargin(node: DiagramNodeData) {
+  const go = getGo();
+  const buttonStyleDefaults = nodeTypeOf(node.typeId)?.buttonStyleDefaults;
+  const paddingX = Math.max(0, Math.round(numberProp(node, "buttonStylePaddingX", buttonStyleDefaults?.paddingX ?? 10)));
+  const paddingY = Math.max(0, Math.round(numberProp(node, "buttonStylePaddingY", buttonStyleDefaults?.paddingY ?? 5)));
+  return new go.Margin(paddingY, paddingX, paddingY, paddingX);
 }
 
 function shouldShowControlImage(node: DiagramNodeData) {
   const mode = controlRenderMode(node);
-  return node.__isControl === true && mode !== "text" && node.__hasImageIcon === true;
+  return node.__isControl === true && mode === "imageText" && node.__hasImageIcon === true;
 }
 
 function shouldShowControlText(node: DiagramNodeData) {
   const mode = controlRenderMode(node);
   return node.__isControl === true && (mode !== "image" || !node.__hasImageIcon);
+}
+
+function shouldShowPureControlImage(node: DiagramNodeData) {
+  return node.__isControl === true && controlRenderMode(node) === "image" && node.__hasImageIcon === true;
+}
+
+function shouldShowStyledControl(node: DiagramNodeData) {
+  return node.__isControl === true && !shouldShowPureControlImage(node);
 }
 
 function shouldShowNodeLabel(node: DiagramNodeData) {
@@ -317,15 +382,22 @@ function colorWithOpacity(color: string, opacity: number) {
 }
 
 function resolveGroupFill(node: DiagramNodeData) {
-  if (node.props?.transparentBackground === true) return "transparent";
-  const color = node.runtime?.backgroundColor || "#eef6ff";
-  const opacity = Number(node.props?.backgroundOpacity);
+  const defaults = nodeTypeOf(node.typeId)?.groupStyleDefaults;
+  const transparentBackground = node.props?.transparentBackground ?? defaults?.transparentBackground;
+  if (transparentBackground === true) return "transparent";
+  const color = node.runtime?.backgroundColor || defaults?.backgroundColor || "#eef6ff";
+  const opacity = Number(node.props?.backgroundOpacity ?? defaults?.backgroundOpacity);
   if (!Number.isFinite(opacity)) return color;
   return colorWithOpacity(color, opacity / 100);
 }
 
+function resolveGroupStroke(node: DiagramNodeData) {
+  return node.runtime?.borderColor || nodeTypeOf(node.typeId)?.groupStyleDefaults?.borderColor || "#3b82f6";
+}
+
 function resolveGroupStrokeDash(node: DiagramNodeData) {
-  return node.props?.dashedBorder === true ? [8, 6] : null;
+  const dashedBorder = node.props?.dashedBorder ?? nodeTypeOf(node.typeId)?.groupStyleDefaults?.dashedBorder;
+  return dashedBorder === true ? [8, 6] : null;
 }
 
 function getPortSide(port: PortDefinition): PortSide {
@@ -340,15 +412,17 @@ function getPortSide(port: PortDefinition): PortSide {
 
 function buildPortData(typeId: string): DiagramPortData[] {
   const nodeType = nodeTypeOf(typeId);
-  const ports = nodeType?.category === "control" && nodeType.ports?.length === 0
-    ? []
-    : getNodePorts(nodeType?.ports);
+  const ports = resolveNodeTypePorts(nodeType);
   return ports.map((port) => {
     return {
       ...port,
       side: getPortSide(port)
     };
   });
+}
+
+function resolveNodeTypePorts(nodeType?: NodeTypeDefinition): PortDefinition[] {
+  return Array.isArray(nodeType?.ports) ? nodeType.ports : defaultNodePorts;
 }
 
 function getDefaultNodeSize(node: TopologyNode) {
@@ -371,10 +445,22 @@ function buildDiagramNodes(nodes: TopologyData["nodes"]): DiagramNodeData[] {
       __iconText: resolveIconText(node, icon),
       __hasImageIcon: isImageIcon(icon),
       __isAnnotation: isAnnotationNode(node),
+      __isContainer: isContainerNode(node),
       __isControl: isControlNode(node),
       __ports: buildPortData(node.typeId)
     };
   });
+}
+
+function refreshDerivedNodeData(model: GoJS.GraphLinksModel, nodeData: DiagramNodeData) {
+  const icon = resolveNodeIcon(nodeData);
+  model.setDataProperty(nodeData, "__icon", icon);
+  model.setDataProperty(nodeData, "__iconText", resolveIconText(nodeData, icon));
+  model.setDataProperty(nodeData, "__hasImageIcon", isImageIcon(icon));
+  model.setDataProperty(nodeData, "__isAnnotation", isAnnotationNode(nodeData));
+  model.setDataProperty(nodeData, "__isContainer", isContainerNode(nodeData));
+  model.setDataProperty(nodeData, "__isControl", isControlNode(nodeData));
+  model.setDataProperty(nodeData, "__ports", buildPortData(nodeData.typeId));
 }
 
 function buildDiagramLinks(links: TopologyData["links"]): DiagramLinkData[] {
@@ -524,7 +610,7 @@ function canLinkTo(direction?: PortDefinition["direction"]) {
 }
 
 function findNodePort(typeId: string, portId: string) {
-  return getNodePorts(nodeTypeOf(typeId)?.ports).find((port) => port.id === normalizePortId(portId));
+  return resolveNodeTypePorts(nodeTypeOf(typeId)).find((port) => port.id === normalizePortId(portId));
 }
 
 function getConnectedCount(node: GoJS.Node, portId: string, direction: "from" | "to") {
@@ -732,6 +818,8 @@ function updateNodeDataFromProps(nodeKey: string, patch: Partial<TopologyNode>) 
       }
       m.setDataProperty(nodeData, key, value);
     });
+    refreshDerivedNodeData(m as GoJS.GraphLinksModel, nodeData);
+    m.updateTargetBindings(nodeData);
   }, "update node from props");
 }
 
@@ -946,6 +1034,138 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function normalizeDataKey(value: string | undefined) {
+  return (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function configuredNodeIdentifier(node: TopologyNode) {
+  const identifier = node.props?.identifier;
+  return typeof identifier === "string" ? identifier.trim() : "";
+}
+
+function nodeDataKeys(node: TopologyNode) {
+  return [configuredNodeIdentifier(node), node.key, node.label, node.typeId]
+    .filter(Boolean)
+    .flatMap((value) => {
+      const text = String(value);
+      return [text, text.toLowerCase(), normalizeDataKey(text)];
+    })
+    .filter(Boolean);
+}
+
+function preferredNodeDataKey(node: TopologyNode) {
+  return normalizeDataKey(configuredNodeIdentifier(node))
+    || normalizeDataKey(node.label)
+    || normalizeDataKey(node.key)
+    || normalizeDataKey(node.typeId);
+}
+
+function readDefinedPath(source: Record<string, unknown>, path: string) {
+  const value = readExpressionPath(source, path);
+  return value === undefined ? undefined : value;
+}
+
+function runtimeFieldNames(fieldName: string) {
+  if (fieldName === "state") return ["state", "status"];
+  if (fieldName === "status") return ["status", "state"];
+  return [fieldName];
+}
+
+function eventPathFirstSegment(path: string) {
+  return path.split(".").filter(Boolean)[0] ?? "";
+}
+
+function isAbsoluteEventPath(path: string) {
+  const firstSegment = eventPathFirstSegment(path);
+  if (!firstSegment || firstSegment === path) return false;
+  if (["metaData", "mateData", "runtimeData", "node", "nodeData", "bindNode", "boundNode", "boundProps", "boundData", "topology"].includes(firstSegment)) return true;
+  if (props.topologyData?.nodes.some((node) => node.key === firstSegment)) return true;
+  if (props.topologyData?.dataSources?.some((source) => source.sourceId === firstSegment)) return true;
+  return false;
+}
+
+function readBoundNodeLocalPath(bindNode: TopologyNode | undefined, normalizedPath: string) {
+  if (!bindNode) return undefined;
+  return readDefinedPath(bindNode as Record<string, unknown>, normalizedPath);
+}
+
+function readBoundNodeMappedPath(context: Record<string, unknown>, bindNode: TopologyNode | undefined, normalizedPath: string) {
+  if (!bindNode) return undefined;
+
+  const scopedValue = readDefinedPath(context, `${bindNode.key}.${normalizedPath}`);
+  if (scopedValue !== undefined) return scopedValue;
+
+  const sourceId = bindNode.dataBinding?.sourceId;
+  if (!sourceId) return undefined;
+
+  const mappedPath = bindNode.dataBinding?.mappings?.[normalizedPath];
+  if (mappedPath) {
+    const mappedValue = readDefinedPath(context, `${sourceId}.${normalizeExpressionPath(mappedPath)}`);
+    if (mappedValue !== undefined) return mappedValue;
+    const mappedDataValue = readDefinedPath(context, `${sourceId}.data.${normalizeExpressionPath(mappedPath)}`);
+    if (mappedDataValue !== undefined) return mappedDataValue;
+  }
+
+  if (normalizedPath.includes(".")) {
+    const sourceScopedValue = readDefinedPath(context, `${sourceId}.${normalizedPath}`);
+    if (sourceScopedValue !== undefined) return sourceScopedValue;
+  } else {
+    const dataKey = preferredNodeDataKey(bindNode);
+    const fieldNames = runtimeFieldNames(normalizedPath);
+
+    if (dataKey) {
+      for (const fieldName of fieldNames) {
+        const sourceDataValue = readDefinedPath(context, `${sourceId}.data.${dataKey}.${fieldName}`);
+        if (sourceDataValue !== undefined) return sourceDataValue;
+      }
+    }
+
+    for (const key of nodeDataKeys(bindNode)) {
+      for (const fieldName of fieldNames) {
+        const nodeDataValue = readDefinedPath(context, `${sourceId}.data.${key}.${fieldName}`);
+        if (nodeDataValue !== undefined) return nodeDataValue;
+        const sourceNodeValue = readDefinedPath(context, `${sourceId}.${key}.${fieldName}`);
+        if (sourceNodeValue !== undefined) return sourceNodeValue;
+      }
+    }
+
+    for (const fieldName of fieldNames) {
+      const dataFieldValue = readDefinedPath(context, `${sourceId}.data.${fieldName}`);
+      if (dataFieldValue !== undefined) return dataFieldValue;
+      const sourceFieldValue = readDefinedPath(context, `${sourceId}.${fieldName}`);
+      if (sourceFieldValue !== undefined) return sourceFieldValue;
+    }
+  }
+
+  return readDefinedPath(context, `${sourceId}.data.${normalizedPath}`)
+    ?? readDefinedPath(context, `${sourceId}.${normalizedPath}`);
+}
+
+function resolveBoundDataPath(context: Record<string, unknown>, bindNode: TopologyNode | undefined, bindDataPath?: string) {
+  if (!bindDataPath) return undefined;
+  const normalizedPath = normalizeExpressionPath(bindDataPath);
+  if (!normalizedPath) return undefined;
+  const firstSegment = eventPathFirstSegment(normalizedPath);
+
+  if (firstSegment === "props" || firstSegment === "runtime") {
+    const localValue = readBoundNodeLocalPath(bindNode, normalizedPath);
+    if (localValue !== undefined) return localValue;
+  }
+
+  if (isAbsoluteEventPath(normalizedPath)) {
+    const absoluteValue = readDefinedPath(context, normalizedPath);
+    if (absoluteValue !== undefined) return absoluteValue;
+  }
+
+  const mappedValue = readBoundNodeMappedPath(context, bindNode, normalizedPath);
+  if (mappedValue !== undefined) return mappedValue;
+
+  const contextValue = readDefinedPath(context, normalizedPath);
+  if (contextValue !== undefined) return contextValue;
+
+  return readBoundNodeLocalPath(bindNode, normalizedPath);
+}
+
 function eventConfigsForTrigger(node: DiagramNodeData, trigger: NodeEventConfig["trigger"]) {
   return (node.eventConfig ?? []).filter((config) => {
     const normalizedTrigger = config.trigger || (config as NodeEventConfig & { event?: NodeEventConfig["trigger"] }).event;
@@ -957,13 +1177,7 @@ function buildEventContext(node: DiagramNodeData, config: NodeEventConfig) {
   const bindNode = config.bindNodeKey
     ? props.topologyData?.nodes.find((item) => item.key === config.bindNodeKey)
     : undefined;
-  const boundData = bindNode
-    ? config.bindDataPath
-      ? readExpressionPath(bindNode as Record<string, unknown>, config.bindDataPath)
-      : bindNode
-    : undefined;
-
-  return {
+  const context = {
     ...(props.eventContext ?? {}),
     node,
     nodeData: node,
@@ -971,8 +1185,14 @@ function buildEventContext(node: DiagramNodeData, config: NodeEventConfig) {
     runtime: node.runtime ?? {},
     bindNode,
     boundNode: bindNode,
-    boundData,
+    boundProps: bindNode?.props ?? {},
     topology: props.topologyData
+  };
+  const boundData = resolveBoundDataPath(context, bindNode, config.bindDataPath);
+
+  return {
+    ...context,
+    boundData
   };
 }
 
@@ -983,10 +1203,12 @@ function resolveNodeEventData(node: DiagramNodeData, config: NodeEventConfig) {
     ? resolveExpressionValue(config.eventDataTemplate, context)
     : {};
   const boundData = context.boundData;
+  const bindNode = context.bindNode;
 
   return {
     ...staticData,
     ...(isRecord(templateData) ? templateData : {}),
+    ...(bindNode ? { boundProps: context.boundProps } : {}),
     ...(boundData !== undefined ? { boundData } : {})
   };
 }
@@ -1579,12 +1801,32 @@ function createDiagram(el: HTMLDivElement) {
             new go.Binding("text", "__iconText"),
             new go.Binding("visible", "", (node: DiagramNodeData) => !node.__isAnnotation && !node.__isControl && !node.__hasImageIcon)
           ),
+          $(go.Picture,
+            {
+              alignment: go.Spot.Center,
+              stretch: go.GraphObject.Fill,
+              imageStretch: go.GraphObject.UniformToFill
+            },
+            new go.Binding("desiredSize", "size", getIconDesiredSize),
+            new go.Binding("source", "__icon"),
+            new go.Binding("visible", "", (node: DiagramNodeData) => node.__isAnnotation === true && node.__hasImageIcon === true)
+          ),
+          $(go.Picture,
+            {
+              alignment: go.Spot.Center,
+              stretch: go.GraphObject.Fill,
+              imageStretch: go.GraphObject.Uniform
+            },
+            new go.Binding("desiredSize", "size", getIconDesiredSize),
+            new go.Binding("source", "__icon"),
+            new go.Binding("visible", "", shouldShowPureControlImage)
+          ),
           $(go.Panel, "Auto",
             {
               alignment: go.Spot.Center,
               stretch: go.GraphObject.Fill
             },
-            new go.Binding("visible", "__isControl"),
+            new go.Binding("visible", "", shouldShowStyledControl),
             $(go.Shape, "RoundedRectangle",
               {
                 fill: "#eff6ff",
@@ -1593,14 +1835,17 @@ function createDiagram(el: HTMLDivElement) {
                 parameter1: 6,
                 stretch: go.GraphObject.Fill
               },
-              new go.Binding("fill", "runtime", (runtime) => runtime?.backgroundColor || "#eff6ff"),
-              new go.Binding("stroke", "runtime", (runtime) => runtime?.borderColor || "#2563eb")
+              new go.Binding("fill", "", resolveControlFill),
+              new go.Binding("stroke", "", resolveControlStroke),
+              new go.Binding("strokeWidth", "", resolveControlStrokeWidth),
+              new go.Binding("parameter1", "", resolveControlCorner)
             ),
             $(go.Panel, "Horizontal",
               {
                 alignment: go.Spot.Center,
                 margin: new go.Margin(5, 10, 5, 10)
               },
+              new go.Binding("margin", "", resolveControlContentMargin),
               $(go.Picture,
                 {
                   desiredSize: new go.Size(22, 22),
@@ -1618,6 +1863,8 @@ function createDiagram(el: HTMLDivElement) {
                   overflow: go.TextBlock.OverflowEllipsis
                 },
                 new go.Binding("text", "", resolveControlText),
+                new go.Binding("font", "", resolveControlTextFont),
+                new go.Binding("stroke", "", resolveControlTextStroke),
                 new go.Binding("visible", "", shouldShowControlText)
               )
             )
@@ -1721,8 +1968,18 @@ function createDiagram(el: HTMLDivElement) {
         $(go.Shape, "RoundedRectangle",
           { fill: "#eef6ff", stroke: "#3b82f6", strokeWidth: 1.5 },
           new go.Binding("fill", "", resolveGroupFill),
-          new go.Binding("stroke", "runtime", (runtime) => runtime?.borderColor || "#3b82f6"),
+          new go.Binding("stroke", "", resolveGroupStroke),
           new go.Binding("strokeDashArray", "", resolveGroupStrokeDash)
+        ),
+        $(go.Picture,
+          {
+            alignment: go.Spot.Center,
+            stretch: go.GraphObject.Fill,
+            imageStretch: go.GraphObject.UniformToFill
+          },
+          new go.Binding("desiredSize", "size", getIconDesiredSize),
+          new go.Binding("source", "__icon"),
+          new go.Binding("visible", "", (node: DiagramNodeData) => node.__isContainer === true && node.__hasImageIcon === true)
         ),
         $(go.Panel, "Vertical",
           $(go.TextBlock,

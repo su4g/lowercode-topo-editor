@@ -23,11 +23,6 @@ const nodeTypes: NodeTypeDefinition[] = [
           { label: "10kV", value: "10kV" }
         ]
       }
-    ],
-    bindableFields: [
-      { field: "breakerState", label: "开合状态", type: "enum", options: ["open", "closed", "tripped"] },
-      { field: "voltage", label: "电压", type: "number", unit: "V" },
-      { field: "current", label: "电流", type: "number", unit: "A" }
     ]
   },
   {
@@ -39,10 +34,13 @@ const nodeTypes: NodeTypeDefinition[] = [
     ports: defaultNodePorts,
     isGroup: true,
     canContain: ["equipment", "annotation", "container", "control"],
-    bindableFields: [
-      { field: "alarmCount", label: "告警数量", type: "number" },
-      { field: "enabled", label: "启用状态", type: "boolean" }
-    ]
+    groupStyleDefaults: {
+      backgroundColor: "#eef6ff",
+      borderColor: "#3b82f6",
+      backgroundOpacity: 100,
+      transparentBackground: false,
+      dashedBorder: false
+    }
   },
   {
     id: "text",
@@ -51,6 +49,10 @@ const nodeTypes: NodeTypeDefinition[] = [
     template: "textTemplate",
     defaultSize: { width: 140, height: 64 },
     ports: defaultNodePorts,
+    annotationDefaults: {
+      textColor: "#111827",
+      textSize: 14
+    },
     formSchema: [
       { field: "textTemplate", label: "文本模板", type: "textarea", defaultValue: "电压：${U} V" }
     ]
@@ -63,6 +65,21 @@ const nodeTypes: NodeTypeDefinition[] = [
     defaultSize: { width: 112, height: 42 },
     icon: "按钮",
     ports: [],
+    buttonDefaults: {
+      buttonText: "按钮",
+      buttonRenderMode: "text",
+      buttonDefaultVisible: true
+    },
+    buttonStyleDefaults: {
+      backgroundColor: "#eff6ff",
+      borderColor: "#2563eb",
+      textColor: "#1d4ed8",
+      textSize: 13,
+      borderWidth: 1.5,
+      borderRadius: 6,
+      paddingX: 10,
+      paddingY: 5
+    },
     formSchema: [
       { field: "buttonText", label: "按钮文字", type: "text", defaultValue: "按钮" },
       {
@@ -179,9 +196,10 @@ async function upsertNodeType(item: NodeTypeDefinition) {
         allowNestedGroup: item.allowNestedGroup,
         ports: item.ports ?? [],
         formSchema: item.formSchema ?? [],
-        bindableFields: item.bindableFields ?? [],
-        connectionCapabilities: item.connectionCapabilities ?? [],
-        actions: item.actions ?? []
+        groupStyleDefaults: item.groupStyleDefaults,
+        annotationDefaults: item.annotationDefaults,
+        buttonDefaults: item.buttonDefaults,
+        buttonStyleDefaults: item.buttonStyleDefaults
       })
     },
     create: {
@@ -200,9 +218,10 @@ async function upsertNodeType(item: NodeTypeDefinition) {
         allowNestedGroup: item.allowNestedGroup,
         ports: item.ports ?? [],
         formSchema: item.formSchema ?? [],
-        bindableFields: item.bindableFields ?? [],
-        connectionCapabilities: item.connectionCapabilities ?? [],
-        actions: item.actions ?? []
+        groupStyleDefaults: item.groupStyleDefaults,
+        annotationDefaults: item.annotationDefaults,
+        buttonDefaults: item.buttonDefaults,
+        buttonStyleDefaults: item.buttonStyleDefaults
       })
     }
   });

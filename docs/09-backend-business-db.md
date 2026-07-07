@@ -208,6 +208,94 @@
 
 当前没有 migrations 目录，项目通过 `prisma db push` 同步结构。
 
+### 表关系总览
+
+```mermaid
+erDiagram
+  topology ||--o{ topology_version : "has versions"
+  topology {
+    TEXT id PK
+    VARCHAR topology_code UK
+    VARCHAR topology_name
+    VARCHAR status
+    TEXT current_version_id
+    VARCHAR remark
+    TIMESTAMP created_at
+    TIMESTAMP updated_at
+  }
+  topology_version {
+    TEXT id PK
+    TEXT topology_id FK
+    VARCHAR version_no
+    VARCHAR version_name
+    JSONB config_json
+    BOOLEAN published
+    VARCHAR created_by
+    TIMESTAMP created_at
+  }
+  topology_operation_log {
+    TEXT id PK
+    TEXT topology_id
+    VARCHAR operation_type
+    VARCHAR operation_desc
+    JSONB before_json
+    JSONB after_json
+    VARCHAR operator
+    TIMESTAMP created_at
+  }
+  topology_node_type {
+    TEXT id PK
+    VARCHAR type_code UK
+    VARCHAR type_name
+    VARCHAR category
+    VARCHAR template_code
+    VARCHAR icon
+    BOOLEAN enabled
+    INTEGER sort_no
+    JSONB config_json
+    TIMESTAMP created_at
+    TIMESTAMP updated_at
+  }
+  topology_data_source {
+    TEXT id PK
+    VARCHAR source_code UK
+    VARCHAR source_name
+    VARCHAR source_type
+    BOOLEAN enabled
+    JSONB config_json
+    TIMESTAMP created_at
+    TIMESTAMP updated_at
+  }
+```
+
+说明：
+
+- 目前只有 `topology_version.topology_id -> topology.id` 建了数据库外键。
+- `topology.current_version_id` 保存当前发布版本 ID，但 Prisma schema 暂未声明外键关系。
+- `topology_operation_log.topology_id` 只建索引，暂未声明外键，便于日志保留或后续补齐审计策略。
+- 节点类型、数据源与拓扑版本之间的引用关系保存在 `config_json` 中，当前没有数据库级外键。
+
+### 表清单
+
+| 表名 | Prisma Model | 用途 | 主要写入入口 |
+|---|---|---|---|
+| `topology_node_type` | `TopologyNodeType` | 节点类型、模板、端口、表单和默认样式配置 | 节点类型接口、`seed.ts` |
+| `topology_data_source` | `TopologyDataSource` | 静态、HTTP、WebSocket、MQTT 等数据源配置 | 数据源接口、`seed.ts` |
+| `topology` | `Topology` | 拓扑主记录、状态和当前发布版本指针 | 拓扑新增、保存、发布、`seed.ts` |
+| `topology_version` | `TopologyVersion` | 每次保存生成一条完整拓扑 JSON 版本 | 拓扑新增、保存、`seed.ts` |
+| `topology_operation_log` | `TopologyOperationLog` | 操作审计日志预留表 | 当前未写入 |
+
+### 通用字段约定
+
+- 主键 `id` 使用 Prisma Client 生成的 `cuid()`，数据库 DDL 中没有默认值。
+- `created_at` 使用数据库默认值 `CURRENT_TIMESTAMP`。
+- 带 `@updatedAt` 的 `updated_at` 由 Prisma Client 在写入时维护，数据库没有触发器。
+- 业务编码字段使用唯一索引：
+  - `topology_node_type.type_code`
+  - `topology_data_source.source_code`
+  - `topology.topology_code`
+- JSON 配置统一使用 PostgreSQL `JSONB`。
+
 ### topology_node_type
 
 用途：节点类型定义表。
@@ -226,6 +314,26 @@
 | `created_at` | `TIMESTAMP(3)` | 默认当前时间 | 创建时间 |
 | `updated_at` | `TIMESTAMP(3)` | 非空 | 更新时间，Prisma 写入时维护 |
 
+索引和约束：
+
+- 主键：`topology_node_type_pkey(id)`。
+- 唯一索引：`topology_node_type_type_code_key(type_code)`。
+
+`config_json` 当前主要保存：
+
+- `description`
+- `defaultSize`
+- `statusImages`
+- `isGroup`
+- `canContain`
+- `allowNestedGroup`
+- `ports`
+- `formSchema`
+- `groupStyleDefaults`
+- `annotationDefaults`
+- `buttonDefaults`
+- `buttonStyleDefaults`
+
 ### topology_data_source
 
 用途：数据源定义表。
@@ -241,6 +349,24 @@
 | `created_at` | `TIMESTAMP(3)` | 默认当前时间 | 创建时间 |
 | `updated_at` | `TIMESTAMP(3)` | 非空 | 更新时间，Prisma 写入时维护 |
 
+索引和约束：
+
+- 主键：`topology_data_source_pkey(id)`。
+- 唯一索引：`topology_data_source_source_code_key(source_code)`。
+
+`source_type` 当前业务侧支持：
+
+- `static`
+- `http`
+- `websocket`
+- `mqtt`
+
+`config_json` 当前主要保存：
+
+- 静态数据：`data`、`mockData`
+- HTTP 配置：`url`、`method`、`headers`、`query`、`body`
+- 运行态模板变量会在接口层替换，数据库只保存原始配置。
+
 ### topology
 
 用途：拓扑主表，保存检索字段和当前发布版本指针。
@@ -255,6 +381,19 @@
 | `remark` | `VARCHAR(512)` | 可空 | 备注 |
 | `created_at` | `TIMESTAMP(3)` | 默认当前时间 | 创建时间 |
 | `updated_at` | `TIMESTAMP(3)` | 非空 | 更新时间，Prisma 写入时维护 |
+
+索引和约束：
+
+- 主键：`topology_pkey(id)`。
+- 唯一索引：`topology_topology_code_key(topology_code)`。
+
+状态约定：
+
+- `draft`：草稿。
+- `published`：已发布。
+- `archived`：归档预留。
+
+当前数据库未对 `status` 建 enum/check 约束，状态合法性由业务代码约定。
 
 ### topology_version
 
@@ -277,6 +416,20 @@
 - 外键 `topology_id -> topology.id`。
 - 删除拓扑时级联删除版本。
 
+`config_json` 保存完整 `TopologyData`，主要包含：
+
+- `id`
+- `name`
+- `version`
+- `nodes`
+- `links`
+
+版本写入规则：
+
+- 新建拓扑会同时创建一条版本。
+- 每次保存拓扑会新增一条草稿版本，不覆盖旧版本。
+- 发布时将最新版本标记为 `published = true`，并更新 `topology.current_version_id`。
+
 ### topology_operation_log
 
 用途：操作日志表。当前表已定义，但业务代码暂未写入。
@@ -296,7 +449,25 @@
 
 - `topology_id` 普通索引。
 
+建议后续写入场景：
+
+- 拓扑创建、保存、发布、归档。
+- 节点类型新增、编辑、禁用。
+- 数据源新增、编辑、禁用。
+- 关键校验失败或发布失败审计。
+
 ## 数据库脚本
+
+### 脚本文件清单
+
+| 文件/命令 | 类型 | 作用 |
+|---|---|---|
+| `apps/server/prisma/schema.prisma` | Prisma schema | 当前数据库模型的主定义来源 |
+| `apps/server/prisma/init.sql` | 建表 SQL | 从空库创建当前所有表、索引和外键 |
+| `apps/server/src/seed.ts` | 种子脚本 | 初始化默认节点类型、数据源和示例拓扑 |
+| `pnpm db:create` | 根目录命令 | 创建本机 PostgreSQL 数据库 `topo_editor` |
+| `pnpm db:push` | 根目录命令 | 使用 Prisma `db push` 将 schema 推到数据库 |
+| `pnpm db:seed` | 根目录命令 | 执行种子数据写入 |
 
 ### 项目内脚本命令
 
@@ -316,7 +487,7 @@ pnpm --filter @topo-editor/server prisma:push
 pnpm --filter @topo-editor/server seed
 ```
 
-### 推荐初始化流程
+### 推荐初始化流程：Prisma 同步
 
 ```bash
 pnpm install
@@ -325,6 +496,28 @@ pnpm --filter @topo-editor/server prisma:generate
 pnpm db:push
 pnpm db:seed
 ```
+
+说明：
+
+- `pnpm db:create` 依赖本机存在 `createdb` 命令，并默认创建 `topo_editor` 数据库。
+- 数据库连接串读取 `apps/server/.env` 中的 `DATABASE_URL`。
+- 当前项目没有 Prisma migrations，开发环境以 `db push` 为准。
+
+### 可选初始化流程：直接执行 SQL
+
+如果需要从空库直接建表，可执行：
+
+```bash
+psql "$DATABASE_URL" -f apps/server/prisma/init.sql
+pnpm --filter @topo-editor/server prisma:generate
+pnpm db:seed
+```
+
+注意：
+
+- `init.sql` 只负责建表、索引和外键，不包含种子数据。
+- 直接执行 `init.sql` 前需要确保目标 schema 中不存在同名表。
+- 如果后续 schema 发生变化，需要重新生成或手工维护 `init.sql`。
 
 ### 建表 SQL
 
@@ -343,6 +536,46 @@ pnpm --filter @topo-editor/server exec prisma migrate diff --from-empty --to-sch
 - `id` 字段的 cuid 默认值由 Prisma Client 在写入时生成，DDL 中不会生成数据库侧默认值。
 - `updated_at` 由 Prisma 的 `@updatedAt` 在写入时维护，DDL 中没有数据库触发器。
 - 如果绕过 Prisma 直接执行 INSERT，需要自行提供 `id` 和 `updated_at`。
+
+### 结构变更流程
+
+当前建议流程：
+
+```bash
+# 1. 修改 Prisma schema
+$EDITOR apps/server/prisma/schema.prisma
+
+# 2. 校验 schema
+pnpm --filter @topo-editor/server exec prisma validate
+
+# 3. 同步本地数据库
+pnpm db:push
+
+# 4. 重新生成初始化 SQL
+pnpm --filter @topo-editor/server exec prisma migrate diff --from-empty --to-schema-datamodel prisma/schema.prisma --script > apps/server/prisma/init.sql
+
+# 5. 生成 Prisma Client
+pnpm --filter @topo-editor/server prisma:generate
+
+# 6. 运行类型检查
+pnpm typecheck
+```
+
+如果进入多人协作或生产环境发布阶段，建议改用 Prisma migrations：
+
+```bash
+pnpm --filter @topo-editor/server exec prisma migrate dev --name <change-name>
+pnpm --filter @topo-editor/server exec prisma migrate deploy
+```
+
+### 当前数据库结构限制
+
+- 未使用 migrations，无法记录每次结构变更历史。
+- `topology.current_version_id` 未声明数据库外键。
+- `topology_operation_log.topology_id` 未声明数据库外键。
+- `status`、`category`、`source_type` 等字段未使用 enum/check 约束。
+- JSONB 内部结构主要由 TypeScript 类型和接口逻辑约束，数据库不校验字段细节。
+- 直接绕过 Prisma 写入时，需要自行维护 `id`、`updated_at` 和 JSON 结构合法性。
 
 ### 种子数据
 
@@ -368,4 +601,3 @@ pnpm --filter @topo-editor/server exec prisma migrate diff --from-empty --to-sch
 ```bash
 pnpm db:seed
 ```
-

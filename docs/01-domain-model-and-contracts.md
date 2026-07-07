@@ -43,7 +43,7 @@ packages/topology-shared/src/
 export type NodeTypeDefinition = {
   id: string;
   name: string;
-  category: "equipment" | "container" | "annotation";
+  category: "equipment" | "container" | "annotation" | "control";
   description?: string;
   icon?: string;
   template: string;
@@ -53,9 +53,6 @@ export type NodeTypeDefinition = {
   allowNestedGroup?: boolean;
   ports?: PortDefinition[];
   formSchema?: FormFieldDefinition[];
-  bindableFields?: BindableFieldDefinition[];
-  connectionCapabilities?: ConnectionCapability[];
-  actions?: NodeActionDefinition[];
 };
 ```
 
@@ -74,8 +71,6 @@ export type PortDefinition = {
   direction: "in" | "out" | "both";
   maxLinks?: number;
   linkTypes?: string[];
-  voltageLevel?: string;
-  signalType?: "power" | "signal" | "network" | "control";
 };
 ```
 

@@ -11,6 +11,7 @@ export type NodeEventConfig = {
   eventData?: Record<string, unknown>;
   eventDataTemplate?: Record<string, unknown>;
   bindNodeKey?: string;
+  /** Supports rule-style expression paths. Local props/runtime paths resolve against the bound node. */
   bindDataPath?: string;
   preventDefault?: boolean;
 };

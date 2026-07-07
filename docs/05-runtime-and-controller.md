@@ -156,6 +156,12 @@ export type TopologyEvent =
   | { type: "GROUP_CLICK"; mode: "edit" | "runtime"; groupKey: string; groupData: TopologyNode };
 ```
 
+配置型节点事件 `NODE_EVENT.data` 会合并手写 `eventData`、模板 `eventDataTemplate` 和系统绑定字段：
+
+- `boundProps`：绑定节点的动态表单数据，即绑定节点 `props`。
+- `boundData`：`bindDataPath` 表达式解析结果；未配置或未命中时不输出。
+- `bindDataPath` 支持规则同款表达式路径，例如 `state`、`props.identifier`、`${metaData.deviceId}`、`sourceId.data.device.status`。
+
 验收：
 
 - 点击节点可打开业务详情。
