@@ -4,7 +4,6 @@ import { ElMessage } from "element-plus";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ModuleNav from "../components/ModuleNav.vue";
-import PropertyPanel from "../components/PropertyPanel/index.vue";
 import TopologyCanvas from "../components/TopologyCanvas/index.vue";
 import { listNodeTypes } from "../services/nodeTypeApi";
 import { queryRuntime } from "../services/runtimeApi";
@@ -96,6 +95,21 @@ function currentTemplateTopology() {
 
 function jsonText(value: unknown) {
   return JSON.stringify(value ?? {}, null, 2);
+}
+
+function nodeTypeName(typeId: string) {
+  return nodeTypes.value.find((nodeType) => nodeType.id === typeId)?.name ?? typeId;
+}
+
+function selectedLinkLabel(link: TopologyLink) {
+  const from = topology.value?.nodes.find((node) => node.key === link.from)?.label ?? link.from;
+  const to = topology.value?.nodes.find((node) => node.key === link.to)?.label ?? link.to;
+  return link.label || `${from} -> ${to}`;
+}
+
+function runtimeStatusText(node: TopologyNode) {
+  const runtime = node.runtime as (NodeRuntime & { state?: string }) | undefined;
+  return runtime?.status ?? runtime?.state ?? "默认";
 }
 
 function handleCanvasEvent(event: TopologyEvent) {
@@ -809,14 +823,56 @@ onBeforeUnmount(() => {
           </div>
           <div v-else class="preview-event-log-empty">暂无事件日志。</div>
         </section>
-        <PropertyPanel
-          class="right-panel"
-          :topology="topology"
-          :node-types="nodeTypes"
-          :selected-node="selectedNode"
-          :selected-link="selectedLink"
-          @select-item="selectedKey = $event"
-        />
+        <section class="runtime-inspector">
+          <template v-if="selectedNode">
+            <div class="runtime-inspector-title">{{ selectedNode.label }}</div>
+            <div class="runtime-inspector-kind">{{ selectedNode.isGroup ? "分组" : nodeTypeName(selectedNode.typeId) }}</div>
+            <div class="runtime-inspector-grid">
+              <span>Key</span>
+              <strong>{{ selectedNode.key }}</strong>
+              <span>状态</span>
+              <strong>{{ runtimeStatusText(selectedNode) }}</strong>
+              <span>显示</span>
+              <strong>{{ selectedNode.runtime?.visible === false ? "隐藏" : "显示" }}</strong>
+              <span>位置</span>
+              <strong>{{ selectedNode.loc || "-" }}</strong>
+            </div>
+            <div v-if="selectedNode.eventConfig?.length" class="runtime-inspector-list">
+              <div class="runtime-inspector-subtitle">事件</div>
+              <div v-for="event in selectedNode.eventConfig" :key="event.id ?? `${event.eventName}_${event.eventKey}`" class="runtime-inspector-item">
+                <strong>{{ event.eventName }}</strong>
+                <span>{{ event.trigger }} / {{ event.eventKey }}</span>
+              </div>
+            </div>
+          </template>
+          <template v-else-if="selectedLink">
+            <div class="runtime-inspector-title">{{ selectedLinkLabel(selectedLink) }}</div>
+            <div class="runtime-inspector-kind">连线</div>
+            <div class="runtime-inspector-grid">
+              <span>Key</span>
+              <strong>{{ selectedLink.key }}</strong>
+              <span>起点</span>
+              <strong>{{ selectedLink.from }}{{ selectedLink.fromPort ? ` / ${selectedLink.fromPort}` : "" }}</strong>
+              <span>终点</span>
+              <strong>{{ selectedLink.to }}{{ selectedLink.toPort ? ` / ${selectedLink.toPort}` : "" }}</strong>
+              <span>状态</span>
+              <strong>{{ selectedLink.runtime?.state ?? selectedLink.defaultState ?? "默认" }}</strong>
+            </div>
+          </template>
+          <template v-else>
+            <div class="runtime-inspector-title">{{ topology?.name ?? "拓扑" }}</div>
+            <div class="runtime-inspector-kind">{{ isPreview ? "预览态" : "运行态" }}</div>
+            <div class="runtime-inspector-grid">
+              <span>节点</span>
+              <strong>{{ topology?.nodes.length ?? 0 }}</strong>
+              <span>连线</span>
+              <strong>{{ topology?.links.length ?? 0 }}</strong>
+              <span>版本</span>
+              <strong>{{ topology?.version ?? "-" }}</strong>
+            </div>
+            <div class="runtime-inspector-empty">点击画布中的节点或连线查看运行态详情。</div>
+          </template>
+        </section>
       </aside>
     </section>
     <el-dialog v-model="previewApiDialogVisible" title="接口预览测试" width="980px" class="preview-api-dialog">
@@ -884,6 +940,99 @@ onBeforeUnmount(() => {
   min-height: 0;
   border: 1px solid #d8dde6;
   border-radius: 8px;
+}
+
+.runtime-inspector {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  background: #ffffff;
+  border: 1px solid #d8dde6;
+  border-radius: 8px;
+}
+
+.runtime-inspector-title {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-size: 16px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-inspector-kind {
+  width: fit-content;
+  padding: 3px 8px;
+  color: #155e75;
+  background: #ecfeff;
+  border: 1px solid #a5f3fc;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.runtime-inspector-grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  padding: 10px;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.runtime-inspector-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-inspector-list {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-inspector-subtitle {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.runtime-inspector-item {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.runtime-inspector-item strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.runtime-inspector-item span,
+.runtime-inspector-empty {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.runtime-inspector-empty {
+  padding: 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  line-height: 1.5;
 }
 
 .preview-event-log {
