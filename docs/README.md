@@ -13,6 +13,7 @@
 7. [06-规则引擎与数据绑定](./06-rule-engine-and-binding.md)
 8. [07-校验发布与权限](./07-validation-release-permission.md)
 9. [08-里程碑任务与验收](./08-milestones-and-acceptance.md)
+10. [09-后端业务点、表结构与数据库脚本](./09-backend-business-db.md)
 
 ## 第一版目标
 
