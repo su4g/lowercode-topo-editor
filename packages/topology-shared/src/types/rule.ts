@@ -2,7 +2,6 @@ export type ConditionGroup = {
   logic?: "and" | "or";
   conditions: Array<Condition | ConditionGroup>;
 };
-
 export type Condition = {
   field: string;
   operator: "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn" | "exists" | "empty";
@@ -47,6 +46,14 @@ export type LinkRuntimeRule = {
   };
 };
 
+export type ContainerStyle = {
+  backgroundColor?: string;
+  backgroundOpacity?: number;
+  borderColor?: string;
+  transparentBackground?: boolean;
+  dashedBorder?: boolean;
+};
+
 export type DisplayRule = {
   id: string;
   name: string;
@@ -60,6 +67,7 @@ export type DisplayRule = {
     backgroundColor?: string;
     borderColor?: string;
     opacity?: number;
+    style?: ContainerStyle;
   };
 };
 

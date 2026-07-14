@@ -10,3 +10,8 @@ export * from "./utils/template";
 export * from "./utils/visibility";
 export * from "./utils/defaultPorts";
 export * from "./utils/expression";
+export * from "./utils/formFieldDefault";
+export * from "./utils/nodeIdentity";
+export * from "./utils/ruleField";
+export * from "./utils/ruleEvaluation";
+export * from "./utils/dataSource";

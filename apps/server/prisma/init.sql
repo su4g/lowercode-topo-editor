@@ -78,6 +78,20 @@ CREATE TABLE "topology_operation_log" (
     CONSTRAINT "topology_operation_log_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "topology_file" (
+    "id" TEXT NOT NULL,
+    "file_name" VARCHAR(255) NOT NULL,
+    "original_name" VARCHAR(255) NOT NULL,
+    "content_type" VARCHAR(128) NOT NULL,
+    "file_size" INTEGER NOT NULL,
+    "business_type" VARCHAR(64) NOT NULL DEFAULT 'topology-asset',
+    "storage_path" VARCHAR(512) NOT NULL,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "topology_file_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "topology_node_type_type_code_key" ON "topology_node_type"("type_code");
 
@@ -93,6 +107,20 @@ CREATE INDEX "topology_version_topology_id_idx" ON "topology_version"("topology_
 -- CreateIndex
 CREATE INDEX "topology_operation_log_topology_id_idx" ON "topology_operation_log"("topology_id");
 
+-- CreateIndex
+CREATE INDEX "topology_file_business_type_idx" ON "topology_file"("business_type");
+
 -- AddForeignKey
 ALTER TABLE "topology_version" ADD CONSTRAINT "topology_version_topology_id_fkey" FOREIGN KEY ("topology_id") REFERENCES "topology"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+┌─────────────────────────────────────────────────────────┐
+│  Update available 5.22.0 -> 7.8.0                       │
+│                                                         │
+│  This is a major update - please follow the guide at    │
+│  https://pris.ly/d/major-version-upgrade                │
+│                                                         │
+│  Run the following to update                            │
+│    npm i --save-dev prisma@latest                       │
+│    npm i @prisma/client@latest                          │
+└─────────────────────────────────────────────────────────┘
 

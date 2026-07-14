@@ -38,6 +38,18 @@ export const topologyNodeSchema = z.object({
   typeId: z.string().min(1),
   label: z.string().min(1),
   labelPosition: z.enum(["top", "right", "bottom", "left"]).optional(),
+  labelOffset: z.object({
+    x: z.number(),
+    y: z.number()
+  }).optional(),
+  labelStyle: z.object({
+    color: z.string().optional(),
+    fontSize: z.number().optional(),
+    fontWeight: z.union([z.string(), z.number()]).optional(),
+    fontStyle: z.enum(["normal", "italic"]).optional(),
+    textDecoration: z.string().optional(),
+    textAlign: z.enum(["left", "center", "right"]).optional()
+  }).optional(),
   loc: z.string().default("0 0"),
   size: z.string().optional(),
   angle: z.number().optional(),
@@ -85,6 +97,10 @@ export const topologyDataSchema = z.object({
   nodes: z.array(topologyNodeSchema),
   links: z.array(topologyLinkSchema),
   globalRules: z.array(z.record(z.unknown())).optional(),
+  canvas: z.object({
+    width: z.number().positive(),
+    height: z.number().positive()
+  }).optional(),
   viewport: z.object({
     position: z.string().optional(),
     scale: z.number().optional()

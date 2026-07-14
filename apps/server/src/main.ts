@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { registerAssetRoutes } from "./modules/assets";
 import { registerDataSourceRoutes } from "./modules/data-sources";
+import { registerFileRoutes } from "./modules/files";
 import { registerNodeTypeRoutes } from "./modules/node-types";
 import { registerRuntimeRoutes } from "./modules/runtime";
 import { registerTopologyRoutes } from "./modules/topologies";
@@ -24,6 +25,7 @@ app.get("/api/health", async () => ({
 
 await registerNodeTypeRoutes(app);
 await registerAssetRoutes(app);
+await registerFileRoutes(app);
 await registerDataSourceRoutes(app);
 await registerTopologyRoutes(app);
 await registerRuntimeRoutes(app);

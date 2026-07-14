@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import type { DataSourceReference, DataSourceType, LinkStyle, NodeTypeDefinition, TopologyData, TopologyLink, TopologyNode } from "@topo-editor/topology-shared";
+import { DEFAULT_TOPOLOGY_CANVAS, type ContainerStyle, type DataSourceReference, type DataSourceType, type LinkStyle, type NodeTypeDefinition, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { ElMessage } from "element-plus";
+import { ArrowLeft, Connection, Delete, Download, FullScreen, List, QuestionFilled, RefreshLeft, RefreshRight, VideoPlay } from "@element-plus/icons-vue";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import ModuleNav from "../components/ModuleNav.vue";
+import JsonTextEditor from "../components/JsonTextEditor.vue";
 import ObjectNavigator from "../components/ObjectNavigator/index.vue";
 import PalettePanel from "../components/PalettePanel/index.vue";
 import PropertyPanel from "../components/PropertyPanel/index.vue";
 import TopologyCanvas from "../components/TopologyCanvas/index.vue";
-import { listNodeTypes } from "../services/nodeTypeApi";
+import { listEnabledNodeTypes } from "../services/nodeTypeApi";
+import { normalizeTopologyCanvas } from "../services/adapters";
 import { getTopology, saveTopology } from "../services/topologyApi";
 
 const route = useRoute();
@@ -19,12 +21,63 @@ const saving = ref(false);
 const selectedKey = ref("");
 const apiDialogVisible = ref(false);
 const objectNavigatorVisible = ref(false);
+const initialLoading = ref(false);
+const loadProgress = ref(0);
+const loadStage = ref("");
+const canvasPreviewTheme = ref<"light" | "dark">("light");
+const operationHelpGroups = [
+  {
+    title: "画布操作",
+    items: [
+      { action: "创建节点", description: "从左侧节点库拖拽到画布；拖入容器可直接加入分组" },
+      { action: "选择与多选", description: "单击选择，按住 Ctrl / ⌘ 单击可追加或取消选择" },
+      { action: "移动与视图", description: "拖拽所选对象移动；拖拽画布空白区域平移，滚轮缩放" },
+      { action: "连线与调整", description: "选中节点后拖拽四周端口连线；拖动节点控制点可缩放、旋转" }
+    ]
+  },
+  {
+    title: "顶部操作",
+    items: [
+      { action: "撤销 / 重做", description: "回退或恢复最近一次画布编辑" },
+      { action: "适配画布", description: "自动缩放并居中显示完整画布" },
+      { action: "对象树", description: "按层级浏览节点、容器与连线，并快速定位对象" },
+      { action: "接口配置", description: "维护运行态数据源、请求参数和 Mock 数据" },
+      { action: "导出 / 预览 / 保存", description: "导出 SVG、检查运行效果或保存当前拓扑" }
+    ]
+  }
+] as const;
+
+const shortcutGroups = [
+  {
+    title: "常用编辑",
+    items: [
+      { keys: ["Ctrl / ⌘", "Z"], description: "撤销" },
+      { keys: ["Ctrl / ⌘", "Y"], description: "重做" },
+      { keys: ["Ctrl / ⌘", "C"], description: "复制所选" },
+      { keys: ["Ctrl / ⌘", "V"], description: "粘贴" },
+      { keys: ["Ctrl / ⌘", "X"], description: "剪切所选" },
+      { keys: ["Delete / Backspace"], description: "删除所选" },
+      { keys: ["Ctrl / ⌘", "A"], description: "全选画布对象" }
+    ]
+  },
+  {
+    title: "精细操作",
+    items: [
+      { keys: ["方向键"], description: "所选对象移动 1 px" },
+      { keys: ["Shift", "方向键"], description: "所选对象移动 10 px" },
+      { keys: ["Option / Alt", "单击"], description: "循环选择当前位置重叠的节点、容器或连线" },
+      { keys: ["Option / Alt", "双击 / 右键"], description: "打开当前位置的重叠对象列表并指定选择" }
+    ]
+  }
+] as const;
 const canvasRef = ref<{
   exportTopology: () => TopologyData | null;
   updateNodeDataFromProps: (nodeKey: string, patch: Partial<TopologyNode>) => void;
   updateLinkDataFromProps: (linkKey: string, patch: Partial<TopologyLink>) => void;
   previewLinkStyle: (linkKey: string, style: LinkStyle) => void;
   clearLinkStylePreview: (linkKey?: string) => void;
+  previewContainerStyle: (nodeKey: string, style: ContainerStyle) => void;
+  clearContainerStylePreview: (nodeKey?: string) => void;
   undo: () => void;
   redo: () => void;
   deleteSelection: () => void;
@@ -39,6 +92,7 @@ function createEmptyTopology(id: string): TopologyData {
     id,
     name: "新建拓扑",
     version: "1.0.0",
+    canvas: { ...DEFAULT_TOPOLOGY_CANVAS },
     dataSources: [],
     nodes: [],
     links: []
@@ -74,6 +128,11 @@ function nodeTypeDefaultProps(nodeType: NodeTypeDefinition) {
   if (nodeType.category === "annotation") {
     props.textColor = nodeType.annotationDefaults?.textColor ?? props.textColor ?? "#111827";
     props.textSize = nodeType.annotationDefaults?.textSize ?? props.textSize ?? 14;
+    props.fontWeight = nodeType.annotationDefaults?.fontWeight ?? props.fontWeight ?? "400";
+    props.fontStyle = nodeType.annotationDefaults?.fontStyle ?? props.fontStyle ?? "normal";
+    props.textDecoration = nodeType.annotationDefaults?.textDecoration ?? props.textDecoration ?? "none";
+    props.textAlign = nodeType.annotationDefaults?.textAlign ?? props.textAlign ?? "left";
+    props.lineHeight = nodeType.annotationDefaults?.lineHeight ?? props.lineHeight ?? Math.round(Number(props.textSize) * 1.4);
   }
 
   if (nodeType.category === "control" || nodeType.template === "buttonTemplate") {
@@ -94,6 +153,7 @@ function nodeTypeDefaultProps(nodeType: NodeTypeDefinition) {
   }
 
   if (nodeType.isGroup || nodeType.category === "container") {
+    props.showLabel = false;
     props.backgroundOpacity = nodeType.groupStyleDefaults?.backgroundOpacity ?? props.backgroundOpacity ?? 100;
     props.transparentBackground = nodeType.groupStyleDefaults?.transparentBackground ?? props.transparentBackground ?? false;
     props.dashedBorder = nodeType.groupStyleDefaults?.dashedBorder ?? props.dashedBorder ?? false;
@@ -113,6 +173,7 @@ function defaultNodeRuntime(nodeType: NodeTypeDefinition) {
 function normalizeNodeSizes(data: TopologyData) {
   return {
     ...data,
+    canvas: normalizeTopologyCanvas(data.canvas),
     dataSources: data.dataSources ?? [],
     nodes: data.nodes.map((node) => {
       if (node.size) return node;
@@ -213,34 +274,12 @@ function removeDataSource(index: number) {
   };
 }
 
-function jsonText(value: unknown) {
-  return JSON.stringify(value ?? {}, null, 2);
+function updateDataSourceJson(index: number, field: "query" | "headers" | "body" | "mockData", value: Record<string, unknown>) {
+  updateDataSourceConfig(index, { [field]: value } as NonNullable<DataSourceReference["config"]>);
 }
 
-function parseJsonObject(value: string, fallbackLabel: string) {
-  try {
-    const parsed = value.trim() ? JSON.parse(value) : {};
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      ElMessage.error(`${fallbackLabel} 必须是 JSON 对象`);
-      return null;
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    ElMessage.error(`${fallbackLabel} 不是合法 JSON`);
-    return null;
-  }
-}
-
-function updateDataSourceJson(index: number, field: "query" | "headers" | "body" | "mockData", value: string) {
-  const parsed = parseJsonObject(value, field);
-  if (!parsed) return;
-  updateDataSourceConfig(index, { [field]: parsed });
-}
-
-function updateDataSourceWsJson(index: number, field: "subscribeMessage", value: string) {
-  const parsed = parseJsonObject(value, field);
-  if (!parsed) return;
-  updateDataSourceWsConfig(index, { [field]: parsed });
+function updateDataSourceWsJson(index: number, field: "subscribeMessage", value: Record<string, unknown>) {
+  updateDataSourceWsConfig(index, { [field]: value });
 }
 
 function updateDataSourceFields(index: number, value: string) {
@@ -282,7 +321,10 @@ function addNode(payload: { nodeType: NodeTypeDefinition; loc?: string; groupKey
 }
 
 function updateTopology(next: TopologyData) {
-  topology.value = next;
+  topology.value = {
+    ...next,
+    canvas: normalizeTopologyCanvas(next.canvas)
+  };
   if (
     selectedKey.value
     && !next.nodes.some((node) => node.key === selectedKey.value)
@@ -296,7 +338,8 @@ function updateTopologyMeta(patch: Partial<TopologyData>) {
   if (!topology.value) return;
   topology.value = {
     ...topology.value,
-    ...patch
+    ...patch,
+    canvas: patch.canvas ? normalizeTopologyCanvas(patch.canvas) : topology.value.canvas
   };
 }
 
@@ -354,6 +397,14 @@ function clearLinkStylePreview(linkKey?: string) {
   canvasRef.value?.clearLinkStylePreview(linkKey);
 }
 
+function previewContainerStyle(nodeKey: string, style: ContainerStyle) {
+  canvasRef.value?.previewContainerStyle(nodeKey, style);
+}
+
+function clearContainerStylePreview(nodeKey?: string) {
+  canvasRef.value?.clearContainerStylePreview(nodeKey);
+}
+
 async function save() {
   if (!topology.value) return;
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -375,8 +426,10 @@ async function previewRuntime() {
   await nextTick();
   const latestTopology = canvasRef.value?.exportTopology() ?? topology.value;
   topology.value = latestTopology;
-  sessionStorage.setItem(`topology-preview:${latestTopology.id}`, JSON.stringify(latestTopology));
-  router.push(`/runtime/${topology.value.id}?preview=1`);
+  const previewPayload = JSON.stringify(latestTopology);
+  sessionStorage.setItem(`topology-preview:${latestTopology.id}`, previewPayload);
+  sessionStorage.setItem("topology-preview:last", previewPayload);
+  router.push(`/topology/runtime?id=${encodeURIComponent(latestTopology.id)}&preview=1`);
 }
 
 function undo() {
@@ -399,29 +452,145 @@ function exportSvg() {
   canvasRef.value?.exportSvg();
 }
 
+async function nextPaintFrame() {
+  await nextTick();
+  await new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve(null));
+  });
+}
+
 onMounted(async () => {
-  nodeTypes.value = await listNodeTypes();
-  const id = String(route.params.id ?? "topology_001");
-  topology.value = normalizeNodeSizes(await getTopology(id) ?? createEmptyTopology(id));
+  initialLoading.value = true;
+  loadStage.value = "加载节点类型与拓扑数据";
+  loadProgress.value = 10;
+  try {
+    const id = typeof route.query.id === "string" && route.query.id ? route.query.id : "topology_001";
+    const [types, data] = await Promise.all([listEnabledNodeTypes(), getTopology(id)]);
+    nodeTypes.value = types;
+
+    loadStage.value = "构建画布";
+    loadProgress.value = 60;
+    // 先绘制进度帧，再执行同步的 GoJS 画布构建
+    await nextPaintFrame();
+    topology.value = normalizeNodeSizes(data ?? createEmptyTopology(id));
+
+    loadStage.value = "渲染完成";
+    loadProgress.value = 100;
+    await nextPaintFrame();
+  } finally {
+    initialLoading.value = false;
+  }
 });
 </script>
 
 <template>
   <main class="app-shell">
     <header class="topbar">
-      <span class="topbar-title">拓扑编辑器</span>
-      <ModuleNav />
+      <el-tooltip content="返回列表" placement="bottom" :show-after="300">
+        <el-button text class="topbar-back" :icon="ArrowLeft" @click="router.push('/topology/list')" />
+      </el-tooltip>
+      <div class="topbar-heading">
+        <span class="topbar-title">拓扑编辑器</span>
+        <span v-if="topology" class="topbar-sub">{{ topology.name }} · v{{ topology.version }}</span>
+      </div>
+      <el-popover
+        placement="bottom-start"
+        :width="720"
+        trigger="click"
+        popper-class="topology-help-popover"
+      >
+        <template #reference>
+          <el-button text class="topbar-help" :icon="QuestionFilled">操作说明</el-button>
+        </template>
+        <div class="operation-help">
+          <div class="operation-help-header">
+            <div>
+              <div class="operation-help-title">操作说明与快捷键</div>
+              <div class="operation-help-subtitle">快捷键需先点击画布使其获得焦点；在输入框中编辑时不会触发画布快捷键。</div>
+            </div>
+            <el-tag size="small" type="info" effect="plain">编辑模式</el-tag>
+          </div>
+
+          <div class="operation-help-content">
+            <section class="operation-help-column">
+              <div v-for="group in operationHelpGroups" :key="group.title" class="operation-help-section">
+                <h4>{{ group.title }}</h4>
+                <dl class="operation-help-list">
+                  <div v-for="item in group.items" :key="item.action" class="operation-help-row is-operation">
+                    <dt>{{ item.action }}</dt>
+                    <dd>{{ item.description }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </section>
+
+            <section class="operation-help-column">
+              <div v-for="group in shortcutGroups" :key="group.title" class="operation-help-section">
+                <h4>{{ group.title }}</h4>
+                <dl class="operation-help-list">
+                  <div v-for="item in group.items" :key="`${group.title}-${item.description}`" class="operation-help-row is-shortcut">
+                    <dt class="shortcut-keys">
+                      <template v-for="(key, index) in item.keys" :key="key">
+                        <span v-if="index" class="shortcut-plus">+</span>
+                        <kbd>{{ key }}</kbd>
+                      </template>
+                    </dt>
+                    <dd>{{ item.description }}</dd>
+                  </div>
+                </dl>
+              </div>
+            </section>
+          </div>
+
+          <div class="operation-help-tip">
+            <el-icon><QuestionFilled /></el-icon>
+            <span>对象重叠时可使用 Option / Alt 辅助选择，也可打开顶部“对象树”按层级定位。</span>
+          </div>
+        </div>
+      </el-popover>
       <span class="topbar-spacer" />
-      <el-button :disabled="!topology" @click="undo">撤销</el-button>
-      <el-button :disabled="!topology" @click="redo">重做</el-button>
-      <el-button :disabled="!topology" @click="fitView">适配</el-button>
-      <el-button :disabled="!topology" type="danger" plain @click="deleteSelection">删除</el-button>
-      <el-button :disabled="!topology" @click="objectNavigatorVisible = !objectNavigatorVisible">对象树</el-button>
-      <el-button :disabled="!topology" @click="apiDialogVisible = true">接口配置</el-button>
-      <el-button :disabled="!topology" @click="exportSvg">导出 SVG</el-button>
+
+      <div class="topbar-group">
+        <el-tooltip content="撤销" placement="bottom" :show-after="300">
+          <el-button text :disabled="!topology" :icon="RefreshLeft" @click="undo" />
+        </el-tooltip>
+        <el-tooltip content="重做" placement="bottom" :show-after="300">
+          <el-button text :disabled="!topology" :icon="RefreshRight" @click="redo" />
+        </el-tooltip>
+        <el-tooltip content="适配画布" placement="bottom" :show-after="300">
+          <el-button text :disabled="!topology" :icon="FullScreen" @click="fitView" />
+        </el-tooltip>
+        <el-tooltip content="删除所选" placement="bottom" :show-after="300">
+          <el-button text type="danger" :disabled="!topology" :icon="Delete" @click="deleteSelection" />
+        </el-tooltip>
+      </div>
+
+      <span class="topbar-divider" />
+
+      <el-segmented
+        v-model="canvasPreviewTheme"
+        :disabled="!topology"
+        :options="[
+          { label: '白底', value: 'light' },
+          { label: '深底', value: 'dark' }
+        ]"
+        size="small"
+      />
+
+      <span class="topbar-divider" />
+
+      <div class="topbar-group">
+        <el-button text :icon="List" :type="objectNavigatorVisible ? 'primary' : ''" :disabled="!topology" @click="objectNavigatorVisible = !objectNavigatorVisible">对象树</el-button>
+        <el-button text :icon="Connection" :disabled="!topology" @click="apiDialogVisible = true">接口配置</el-button>
+        <el-tooltip content="导出 SVG" placement="bottom" :show-after="300">
+          <el-button text :disabled="!topology" :icon="Download" @click="exportSvg" />
+        </el-tooltip>
+      </div>
+
+      <span class="topbar-divider" />
+
+      <el-button :icon="VideoPlay" :disabled="!topology" @click="previewRuntime">预览运行态</el-button>
       <el-button type="primary" :loading="saving" @click="save">保存</el-button>
-      <el-button @click="router.push('/topologies')">返回列表</el-button>
-      <el-button :disabled="!topology" @click="previewRuntime">预览运行态</el-button>
     </header>
     <section class="workspace">
       <PalettePanel class="side-panel" :node-types="nodeTypes" />
@@ -432,6 +601,7 @@ onMounted(async () => {
           :topology-data="topology"
           :node-types="nodeTypes"
           :selected-key="selectedKey"
+          :editor-background-theme="canvasPreviewTheme"
           @change="updateTopology"
           @drop-node="addNode"
           @selection-change="selectedKey = $event"
@@ -457,6 +627,8 @@ onMounted(async () => {
         @select-item="selectedKey = $event"
         @preview-link-style="previewLinkStyle"
         @clear-link-style-preview="clearLinkStylePreview"
+        @preview-container-style="previewContainerStyle"
+        @clear-container-style-preview="clearContainerStylePreview"
       />
     </section>
     <el-dialog v-model="apiDialogVisible" title="拓扑接口配置" width="980px" class="api-config-dialog">
@@ -591,52 +763,47 @@ onMounted(async () => {
           <div class="api-json-grid">
             <label>
               Query 参数 JSON
-              <textarea
-                :value="jsonText(source.config?.query)"
-                rows="6"
-                spellcheck="false"
+              <JsonTextEditor
+                :model-value="source.config?.query"
+                :height="150"
                 placeholder='{"id":"${params.instanceId}"}'
-                @change="updateDataSourceJson(index, 'query', ($event.target as HTMLTextAreaElement).value)"
+                @update:model-value="updateDataSourceJson(index, 'query', $event)"
               />
             </label>
             <label>
               Headers JSON
-              <textarea
-                :value="jsonText(source.config?.headers)"
-                rows="6"
-                spellcheck="false"
+              <JsonTextEditor
+                :model-value="source.config?.headers"
+                :height="150"
                 placeholder='{"Authorization":"Bearer ${token}"}'
-                @change="updateDataSourceJson(index, 'headers', ($event.target as HTMLTextAreaElement).value)"
+                @update:model-value="updateDataSourceJson(index, 'headers', $event)"
               />
             </label>
             <label>
               Body JSON
-              <textarea
-                :value="jsonText(source.config?.body)"
-                rows="6"
-                spellcheck="false"
+              <JsonTextEditor
+                :model-value="source.config?.body"
+                :height="150"
                 placeholder='{"id":"${params.instanceId}"}'
-                @change="updateDataSourceJson(index, 'body', ($event.target as HTMLTextAreaElement).value)"
+                @update:model-value="updateDataSourceJson(index, 'body', $event)"
               />
             </label>
             <label v-if="source.type === 'websocket'">
               WS 订阅消息 JSON
-              <textarea
-                :value="jsonText(source.config?.ws?.subscribeMessage)"
-                rows="6"
-                spellcheck="false"
+              <JsonTextEditor
+                :model-value="source.config?.ws?.subscribeMessage"
+                :height="150"
                 placeholder='{"type":"subscribe","id":"${params.instanceId}"}'
-                @change="updateDataSourceWsJson(index, 'subscribeMessage', ($event.target as HTMLTextAreaElement).value)"
+                @update:model-value="updateDataSourceWsJson(index, 'subscribeMessage', $event)"
               />
             </label>
             <label>
               Mock JSON
-              <textarea
-                :value="jsonText(source.config?.mockData ?? source.config?.data)"
-                rows="6"
-                spellcheck="false"
+              <JsonTextEditor
+                :model-value="source.config?.mockData ?? source.config?.data"
+                :height="150"
                 placeholder='{"data":{"qf1":{"status":"closed"},"deviceB":{"outputVoltage":220}}}'
-                @change="updateDataSourceJson(index, 'mockData', ($event.target as HTMLTextAreaElement).value)"
+                @update:model-value="updateDataSourceJson(index, 'mockData', $event)"
               />
             </label>
           </div>
@@ -644,10 +811,192 @@ onMounted(async () => {
       </div>
       <div v-else class="module-empty">暂无接口配置。</div>
     </el-dialog>
+    <div v-if="initialLoading" class="page-loading-overlay">
+      <div class="page-loading-card">
+        <el-progress :percentage="loadProgress" :stroke-width="10" :show-text="false" />
+        <div class="page-loading-text">{{ loadStage }}（{{ loadProgress }}%）</div>
+      </div>
+    </div>
   </main>
 </template>
 
 <style scoped>
+.app-shell {
+  position: relative;
+}
+
+.topbar-help {
+  flex: none;
+  margin-left: 2px;
+  color: var(--el-text-color-regular, #606266);
+}
+
+.operation-help {
+  display: flex;
+  flex-direction: column;
+  max-height: min(680px, 78vh);
+  color: var(--el-text-color-primary, #303133);
+}
+
+.operation-help-header {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
+
+.operation-help-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.operation-help-subtitle {
+  margin-top: 4px;
+  color: var(--el-text-color-secondary, #909399);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.operation-help-content {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 22px;
+  min-height: 0;
+  padding: 12px 2px 4px;
+  overflow: auto;
+}
+
+.operation-help-column {
+  min-width: 0;
+}
+
+.operation-help-section + .operation-help-section {
+  margin-top: 16px;
+}
+
+.operation-help-section h4 {
+  margin: 0 0 7px;
+  color: var(--el-text-color-primary, #303133);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.operation-help-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.operation-help-row {
+  display: grid;
+  align-items: start;
+  gap: 10px;
+  min-height: 30px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.operation-help-row:nth-child(odd) {
+  background: var(--el-fill-color-lighter, #fafafa);
+}
+
+.operation-help-row.is-operation {
+  grid-template-columns: 74px minmax(0, 1fr);
+}
+
+.operation-help-row.is-shortcut {
+  grid-template-columns: 166px minmax(0, 1fr);
+  align-items: center;
+}
+
+.operation-help-row dt {
+  margin: 0;
+  color: var(--el-text-color-primary, #303133);
+  font-weight: 600;
+}
+
+.operation-help-row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--el-text-color-secondary, #909399);
+}
+
+.shortcut-keys {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.shortcut-keys kbd {
+  display: inline-flex;
+  align-items: center;
+  min-height: 21px;
+  padding: 1px 6px;
+  color: var(--el-text-color-regular, #606266);
+  background: #ffffff;
+  border: 1px solid var(--el-border-color, #dcdfe6);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.shortcut-plus {
+  color: var(--el-text-color-placeholder, #a8abb2);
+  font-size: 10px;
+}
+
+.operation-help-tip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 10px;
+  margin-top: 8px;
+  color: var(--el-color-primary-dark-2, #337ecc);
+  background: var(--el-color-primary-light-9, #ecf5ff);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.page-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(255 255 255 / 72%);
+  backdrop-filter: blur(2px);
+}
+
+.page-loading-card {
+  width: min(360px, 72vw);
+  padding: 20px 24px;
+  background: #ffffff;
+  border: 1px solid #d8dde6;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 10%);
+}
+
+.page-loading-text {
+  margin-top: 10px;
+  color: #4b5563;
+  font-size: 13px;
+  text-align: center;
+}
+
 .api-config-header {
   display: flex;
   align-items: center;

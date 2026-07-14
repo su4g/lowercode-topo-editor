@@ -30,3 +30,9 @@ export function saveTopology(topology: TopologyData): Promise<TopologyData> {
     body: JSON.stringify(topology)
   });
 }
+
+export function deleteTopology(id: string): Promise<{ id: string }> {
+  return request<{ id: string }>(`/api/topologies/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+}

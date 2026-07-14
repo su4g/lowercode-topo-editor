@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { fail, ok } from "../common/http";
+import { prisma } from "../prisma/client";
 
 const uploadDir = resolve(process.cwd(), "uploads");
 
@@ -48,6 +49,7 @@ export async function registerAssetRoutes(app: FastifyInstance): Promise<void> {
         fileName?: string;
         contentType?: string;
         dataUrl?: string;
+        businessType?: string;
       };
 
       const contentType = resolveContentType(body.fileName, body.contentType);
@@ -76,8 +78,19 @@ export async function registerAssetRoutes(app: FastifyInstance): Promise<void> {
       const fileName = `${Date.now()}-${safeName}${ext}`;
       const filePath = join(uploadDir, fileName);
       await writeFile(filePath, buffer);
+      const fileRecord = await prisma.topologyFile.create({
+        data: {
+          fileName,
+          originalName: body.fileName ?? fileName,
+          contentType,
+          fileSize: buffer.length,
+          businessType: body.businessType?.trim() || "topology-asset",
+          storagePath: filePath
+        }
+      });
 
       return ok({
+        id: fileRecord.id,
         fileName,
         contentType,
         url: `/uploads/${fileName}`

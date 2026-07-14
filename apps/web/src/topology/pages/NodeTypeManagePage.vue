@@ -1,15 +1,25 @@
 <script setup lang="ts">
 import {
   defaultNodePorts,
+  colorFormFieldDefaultValue,
+  findDuplicatePortPosition,
+  formFieldDefaultValueError,
+  normalizePortDefinition,
+  numberFormFieldDefaultValue,
+  parseFormFieldDefaultValue,
+  parseFormFieldOptions,
+  VISUAL_PORT_ID_PREFIX,
   type FormFieldDefinition,
   type NodeStatusKey,
   type NodeTypeDefinition,
-  type PortDefinition
+  type PortDefinition,
+  type PortSide
 } from "@topo-editor/topology-shared";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { computed, onMounted, reactive, ref } from "vue";
-import ModuleNav from "../components/ModuleNav.vue";
-import { uploadImageAsset } from "../services/assetApi";
+import { computed, onMounted, reactive, ref, watch } from "vue";
+import JsonTextEditor from "../components/JsonTextEditor.vue";
+import NodeTypeTabHelpLabel from "../components/NodeTypeTabHelpLabel.vue";
+import { displayAssetText, isImageAsset, isOssAssetRef, resolveAssetUrl, uploadImageAsset } from "../services/assetApi";
 import { deleteNodeType, listNodeTypes, saveNodeType } from "../services/nodeTypeApi";
 
 type CustomExtensionType = "string" | "number" | "boolean" | "array" | "object";
@@ -18,6 +28,8 @@ type EditablePort = {
   id: string;
   label: string;
   direction: PortDefinition["direction"];
+  side: PortSide;
+  positionPercent: number;
   maxLinks: string;
   linkTypes: string;
 };
@@ -58,6 +70,11 @@ type NodeTypeForm = {
   groupDashedBorder: boolean;
   annotationTextColor: string;
   annotationTextSize: number;
+  annotationFontWeight: string;
+  annotationFontStyle: "normal" | "italic";
+  annotationTextDecoration: string;
+  annotationTextAlign: "left" | "center" | "right";
+  annotationLineHeight: number;
   buttonText: string;
   buttonRenderMode: "text" | "image" | "imageText";
   buttonDefaultVisible: boolean;
@@ -94,7 +111,10 @@ const nodeTypeConfigKeys = new Set([
   "buttonStyleDefaults",
   "bindableFields",
   "connectionCapabilities",
-  "actions"
+  "actions",
+  "backendId",
+  "enabled",
+  "sortNo"
 ]);
 
 const loading = ref(false);
@@ -105,7 +125,10 @@ const dialogVisible = ref(false);
 const activeConfigTab = ref("base");
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const nodeTypes = ref<NodeTypeDefinition[]>([]);
+const editingBackendId = ref<number | undefined>();
+const editingOriginalTypeCode = ref("");
 const activeCategory = ref<NodeTypeDefinition["category"]>("equipment");
+const assetUrlMap = ref<Record<string, string>>({});
 
 const categoryOptions: Array<{ label: string; value: NodeTypeDefinition["category"] }> = [
   { label: "设备", value: "equipment" },
@@ -113,6 +136,8 @@ const categoryOptions: Array<{ label: string; value: NodeTypeDefinition["categor
   { label: "标注", value: "annotation" },
   { label: "控件", value: "control" }
 ];
+
+const categoryLabelMap = Object.fromEntries(categoryOptions.map((option) => [option.value, option.label]));
 
 const statusOptions: Array<{ label: string; value: NodeStatusKey }> = [
   { label: "默认", value: "default" },
@@ -125,6 +150,13 @@ const portDirectionOptions: Array<{ label: string; value: PortDefinition["direct
   { label: "输入", value: "in" },
   { label: "输出", value: "out" },
   { label: "双向", value: "both" }
+];
+
+const portSideOptions: Array<{ label: string; value: PortSide }> = [
+  { label: "上", value: "top" },
+  { label: "右", value: "right" },
+  { label: "下", value: "bottom" },
+  { label: "左", value: "left" }
 ];
 
 const formFieldTypeOptions: Array<{ label: string; value: FormFieldDefinition["type"] }> = [
@@ -157,7 +189,7 @@ const containOptions = computed(() => [
 ]);
 
 const tabHelp = {
-  base: "维护节点类型的编码、名称、模板、尺寸和图标。",
+  base: "维护节点类型的编码、名称、尺寸和图标。",
   container: "配置节点是否可作为分组容器，以及可容纳哪些节点。",
   ports: "配置节点在画布上的连接端口；空端口表示不可连线。",
   form: "配置实例节点在属性面板中可编辑的业务字段。",
@@ -179,6 +211,8 @@ const fieldHelp = {
   portId: "端口唯一编码，连线会保存这个编码。",
   portLabel: "端口悬浮提示中展示的名称。",
   portDirection: "限制端口可作为连线起点、终点或双向连接。",
+  portSide: "端口所在的节点边。",
+  portPosition: "端口在边上的百分比位置；上、下边从左到右，左、右边从上到下。",
   maxLinks: "限制该端口最多连接的线数；为空表示不限制。",
   linkTypes: "限制允许连接的连线类型；为空表示不限制。",
   fieldCode: "属性字段编码，会保存到节点 props 中。",
@@ -201,7 +235,6 @@ const tabFieldHelp = {
     { label: "类型编码", text: fieldHelp.typeCode },
     { label: "名称", text: fieldHelp.name },
     { label: "分类", text: fieldHelp.category },
-    { label: "模板", text: fieldHelp.template },
     { label: "说明", text: fieldHelp.description },
     { label: "默认尺寸", text: fieldHelp.defaultSize },
     { label: "图标", text: fieldHelp.icon },
@@ -217,6 +250,8 @@ const tabFieldHelp = {
     { label: "编码", text: fieldHelp.portId },
     { label: "名称", text: fieldHelp.portLabel },
     { label: "方向", text: fieldHelp.portDirection },
+    { label: "所在边", text: fieldHelp.portSide },
+    { label: "位置", text: fieldHelp.portPosition },
     { label: "最大连接", text: fieldHelp.maxLinks },
     { label: "连线类型", text: fieldHelp.linkTypes }
   ],
@@ -246,8 +281,33 @@ const DEFAULT_GROUP_STYLE = {
 
 const DEFAULT_ANNOTATION_STYLE = {
   textColor: "#111827",
-  textSize: 14
+  textSize: 14,
+  fontWeight: "400",
+  fontStyle: "normal" as const,
+  textDecoration: "none",
+  textAlign: "left" as const,
+  lineHeight: 20
 };
+
+const annotationFontWeightOptions = [
+  { label: "普通", value: "400" },
+  { label: "中等", value: "500" },
+  { label: "半粗", value: "600" },
+  { label: "粗体", value: "700" }
+];
+
+const annotationTextDecorationOptions = [
+  { label: "无", value: "none" },
+  { label: "下划线", value: "underline" },
+  { label: "删除线", value: "line-through" },
+  { label: "下划线 + 删除线", value: "underline line-through" }
+];
+
+const annotationTextAlignOptions = [
+  { label: "左对齐", value: "left" },
+  { label: "居中", value: "center" },
+  { label: "右对齐", value: "right" }
+];
 
 const DEFAULT_BUTTON_DEFAULTS = {
   buttonText: "按钮",
@@ -297,6 +357,11 @@ function createNodeTypeForm(): NodeTypeForm {
     groupDashedBorder: DEFAULT_GROUP_STYLE.dashedBorder,
     annotationTextColor: DEFAULT_ANNOTATION_STYLE.textColor,
     annotationTextSize: DEFAULT_ANNOTATION_STYLE.textSize,
+    annotationFontWeight: DEFAULT_ANNOTATION_STYLE.fontWeight,
+    annotationFontStyle: DEFAULT_ANNOTATION_STYLE.fontStyle,
+    annotationTextDecoration: DEFAULT_ANNOTATION_STYLE.textDecoration,
+    annotationTextAlign: DEFAULT_ANNOTATION_STYLE.textAlign,
+    annotationLineHeight: DEFAULT_ANNOTATION_STYLE.lineHeight,
     buttonText: DEFAULT_BUTTON_DEFAULTS.buttonText,
     buttonRenderMode: DEFAULT_BUTTON_DEFAULTS.buttonRenderMode,
     buttonDefaultVisible: DEFAULT_BUTTON_DEFAULTS.buttonDefaultVisible,
@@ -316,11 +381,17 @@ function createNodeTypeForm(): NodeTypeForm {
 
 const form = reactive<NodeTypeForm>(createNodeTypeForm());
 
-const dialogTitle = computed(() => (nodeTypes.value.some((item) => item.id === form.id) ? "编辑节点类型" : "新增节点类型"));
+const dialogTitle = computed(() => (editingOriginalTypeCode.value ? "编辑节点类型" : "新增节点类型"));
 const filteredNodeTypes = computed(() => nodeTypes.value.filter((item) => item.category === activeCategory.value));
 const categoryCounts = computed(() => Object.fromEntries(
   categoryOptions.map((option) => [option.value, nodeTypes.value.filter((item) => item.category === option.value).length])
 ) as Record<NodeTypeDefinition["category"], number>);
+const typeCodeError = computed(() => {
+  const typeCode = form.id.trim();
+  if (!typeCode) return "";
+  const duplicated = nodeTypes.value.some((item) => item.id === typeCode && item.id !== editingOriginalTypeCode.value);
+  return duplicated ? `类型编码「${typeCode}」已存在` : "";
+});
 const iconFieldLabel = computed(() => {
   if (form.category === "container" || form.category === "annotation") return "背景图";
   if (form.category === "control") return "按钮图片";
@@ -337,12 +408,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function backendIdOf(nodeType: NodeTypeDefinition) {
+  return typeof nodeType.backendId === "number" ? nodeType.backendId : undefined;
+}
+
 function isImageIcon(icon?: string) {
-  return !!icon && (
-    /^https?:\/\//.test(icon)
-    || icon.startsWith("data:image/")
-    || /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(icon)
-  );
+  return isImageAsset(icon);
+}
+
+function assetPreviewUrl(value?: string) {
+  return value ? assetUrlMap.value[value] || (!isOssAssetRef(value) ? value : "") : "";
+}
+
+function assetLabel(value?: string) {
+  return displayAssetText(value);
+}
+
+async function ensureAssetUrl(value?: string) {
+  if (!value || !isImageAsset(value) || assetUrlMap.value[value]) return;
+  try {
+    const url = await resolveAssetUrl(value);
+    if (url) assetUrlMap.value = { ...assetUrlMap.value, [value]: url };
+  } catch {
+    // Keep the persistent oss reference in the form; preview can recover on the next refresh.
+  }
+}
+
+function ensureNodeTypeAssets(items: NodeTypeDefinition[]) {
+  for (const nodeType of items) {
+    void ensureAssetUrl(nodeType.icon);
+    Object.values(nodeType.statusImages ?? {}).forEach((value) => void ensureAssetUrl(value));
+    const buttonIcon = nodeType.buttonDefaults?.icon;
+    if (typeof buttonIcon === "string") void ensureAssetUrl(buttonIcon);
+  }
 }
 
 function getFallbackSize(category: NodeTypeDefinition["category"], isGroup?: boolean) {
@@ -374,40 +472,10 @@ function textFromList(value?: unknown[]) {
   return (value ?? []).map(String).join("\n");
 }
 
-function parsePrimitive(value: string): string | number | boolean {
-  const trimmed = value.trim();
-  if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === "true";
-  if (trimmed !== "" && Number.isFinite(Number(trimmed))) return Number(trimmed);
-  return trimmed;
-}
-
-function parseDefaultValue(value: string, type: FormFieldDefinition["type"]): unknown {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  if (type === "number") return Number(trimmed);
-  if (type === "boolean") return /^(true|1|yes|是)$/i.test(trimmed);
-  return trimmed;
-}
-
 function defaultValueToText(value: unknown) {
   if (value === undefined || value === null) return "";
   if (typeof value === "string") return value;
   return String(value);
-}
-
-function parseFormOptions(value: string): FormFieldDefinition["options"] | undefined {
-  const lines = listFromText(value);
-  if (!lines.length) return undefined;
-  return lines.map((line) => {
-    const separatorIndex = line.indexOf(":");
-    if (separatorIndex < 0) {
-      const parsedValue = parsePrimitive(line);
-      return { label: line, value: parsedValue };
-    }
-    const label = line.slice(0, separatorIndex).trim();
-    const rawValue = line.slice(separatorIndex + 1).trim();
-    return { label: label || rawValue, value: parsePrimitive(rawValue) };
-  });
 }
 
 function formOptionsToText(options?: FormFieldDefinition["options"]) {
@@ -431,6 +499,19 @@ function customExtensionValueToText(value: unknown) {
   return String(value);
 }
 
+function customExtensionObjectValue(row: CustomExtensionRow) {
+  try {
+    const parsed = row.value.trim() ? JSON.parse(row.value) : {};
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function updateCustomExtensionObject(row: CustomExtensionRow, value: Record<string, unknown>) {
+  row.value = JSON.stringify(value, null, 2);
+}
+
 function parseCustomExtension(row: CustomExtensionRow): unknown {
   const value = row.value.trim();
   if (row.type === "number") {
@@ -450,25 +531,50 @@ function parseCustomExtension(row: CustomExtensionRow): unknown {
 }
 
 function toEditablePort(port?: PortDefinition): EditablePort {
+  const normalized = normalizePortDefinition(port ?? { id: "", label: "", direction: "both" });
   return {
-    id: port?.id ?? "",
-    label: port?.label ?? "",
-    direction: port?.direction ?? "both",
-    maxLinks: port?.maxLinks === undefined ? "" : String(port.maxLinks),
-    linkTypes: textFromList(port?.linkTypes)
+    id: normalized.id,
+    label: normalized.label,
+    direction: normalized.direction,
+    side: normalized.side,
+    positionPercent: normalized.positionPercent,
+    maxLinks: normalized.maxLinks === undefined ? "" : String(normalized.maxLinks),
+    linkTypes: textFromList(normalized.linkTypes)
   };
 }
 
 function toEditableFormField(field?: FormFieldDefinition): EditableFormField {
+  const type = field?.type ?? "text";
+  const defaultValue = defaultValueToText(field?.defaultValue);
+  const normalizedDefaultValue = type === "boolean"
+    ? parseFormFieldDefaultValue(defaultValue, type)
+    : defaultValue;
   return {
     field: field?.field ?? "",
     label: field?.label ?? "",
-    type: field?.type ?? "text",
+    type,
     required: field?.required ?? false,
-    defaultValue: defaultValueToText(field?.defaultValue),
+    defaultValue: typeof normalizedDefaultValue === "boolean" ? String(normalizedDefaultValue) : defaultValue,
     unit: field?.unit ?? "",
     options: formOptionsToText(field?.options)
   };
+}
+
+function editableFormFieldOptions(field: EditableFormField) {
+  return parseFormFieldOptions(field.options);
+}
+
+function formFieldDefaultError(field: EditableFormField) {
+  return formFieldDefaultValueError(field, editableFormFieldOptions(field));
+}
+
+function isSelectDefaultValueMatched(field: EditableFormField) {
+  const value = field.defaultValue.trim();
+  return !!value && !!editableFormFieldOptions(field)?.some((option) => String(option.value) === value);
+}
+
+function updateDefaultValue(field: EditableFormField, value: unknown) {
+  field.defaultValue = value === undefined || value === null ? "" : String(value);
 }
 
 function toCustomExtensionRows(nodeType?: NodeTypeDefinition): CustomExtensionRow[] {
@@ -487,12 +593,16 @@ function assignForm(next: NodeTypeForm) {
 }
 
 function openCreate() {
+  editingBackendId.value = undefined;
+  editingOriginalTypeCode.value = "";
   assignForm(createNodeTypeForm());
   activeConfigTab.value = "base";
   dialogVisible.value = true;
 }
 
 function openEdit(nodeType: NodeTypeDefinition) {
+  editingBackendId.value = backendIdOf(nodeType);
+  editingOriginalTypeCode.value = nodeType.id;
   const defaultSize = nodeType.defaultSize ?? getFallbackSize(nodeType.category, nodeType.isGroup);
   const groupStyleDefaults = {
     ...DEFAULT_GROUP_STYLE,
@@ -533,6 +643,11 @@ function openEdit(nodeType: NodeTypeDefinition) {
     groupDashedBorder: !!groupStyleDefaults.dashedBorder,
     annotationTextColor: annotationDefaults.textColor,
     annotationTextSize: numberOrDefault(annotationDefaults.textSize, DEFAULT_ANNOTATION_STYLE.textSize),
+    annotationFontWeight: annotationDefaults.fontWeight === undefined || annotationDefaults.fontWeight === null ? DEFAULT_ANNOTATION_STYLE.fontWeight : String(annotationDefaults.fontWeight),
+    annotationFontStyle: annotationDefaults.fontStyle === "italic" ? "italic" : "normal",
+    annotationTextDecoration: typeof annotationDefaults.textDecoration === "string" && annotationDefaults.textDecoration.trim() ? annotationDefaults.textDecoration : DEFAULT_ANNOTATION_STYLE.textDecoration,
+    annotationTextAlign: annotationDefaults.textAlign === "center" || annotationDefaults.textAlign === "right" ? annotationDefaults.textAlign : "left",
+    annotationLineHeight: numberOrDefault(annotationDefaults.lineHeight, DEFAULT_ANNOTATION_STYLE.lineHeight),
     buttonText: buttonDefaults.buttonText,
     buttonRenderMode: buttonDefaults.buttonRenderMode === "image" || buttonDefaults.buttonRenderMode === "imageText" ? buttonDefaults.buttonRenderMode : "text",
     buttonDefaultVisible: buttonDefaults.buttonDefaultVisible !== false,
@@ -573,7 +688,12 @@ function buildAnnotationDefaults(): NonNullable<NodeTypeDefinition["annotationDe
   if (form.category !== "annotation") return undefined;
   return {
     textColor: form.annotationTextColor || DEFAULT_ANNOTATION_STYLE.textColor,
-    textSize: Math.max(1, Math.round(numberOrDefault(form.annotationTextSize, DEFAULT_ANNOTATION_STYLE.textSize)))
+    textSize: Math.max(1, Math.round(numberOrDefault(form.annotationTextSize, DEFAULT_ANNOTATION_STYLE.textSize))),
+    fontWeight: form.annotationFontWeight || DEFAULT_ANNOTATION_STYLE.fontWeight,
+    fontStyle: form.annotationFontStyle === "italic" ? "italic" : "normal",
+    textDecoration: form.annotationTextDecoration || DEFAULT_ANNOTATION_STYLE.textDecoration,
+    textAlign: form.annotationTextAlign === "center" || form.annotationTextAlign === "right" ? form.annotationTextAlign : "left",
+    lineHeight: Math.max(1, Math.round(numberOrDefault(form.annotationLineHeight, DEFAULT_ANNOTATION_STYLE.lineHeight)))
   };
 }
 
@@ -645,6 +765,7 @@ function buildPorts(): PortDefinition[] {
     const id = port.id.trim();
     const label = port.label.trim();
     if (!id || !label) throw new Error("端口配置需填写端口编码和名称");
+    if (id.startsWith(VISUAL_PORT_ID_PREFIX)) throw new Error(`端口编码「${id}」使用了系统保留前缀`);
     if (port.maxLinks.trim() && (!Number.isFinite(Number(port.maxLinks)) || Number(port.maxLinks) <= 0)) {
       throw new Error(`端口「${id}」最大连接数需为正数`);
     }
@@ -652,11 +773,21 @@ function buildPorts(): PortDefinition[] {
       id,
       label,
       direction: port.direction,
+      side: port.side,
+      positionPercent: Math.round(port.positionPercent),
       maxLinks: port.maxLinks.trim() ? Math.round(Number(port.maxLinks)) : undefined,
       linkTypes: listFromText(port.linkTypes)
     };
   });
+  if (ports.some((port) => !Number.isFinite(port.positionPercent) || port.positionPercent! < 0 || port.positionPercent! > 100)) {
+    throw new Error("端口位置需为 0 到 100 的整数百分比");
+  }
   validateUnique(ports.map((port) => port.id), "端口编码");
+  const duplicatePosition = findDuplicatePortPosition(ports);
+  if (duplicatePosition) {
+    const sideLabel = portSideOptions.find((option) => option.value === duplicatePosition.side)?.label ?? duplicatePosition.side;
+    throw new Error(`端口位置「${sideLabel}边 ${duplicatePosition.positionPercent}%」重复`);
+  }
   return ports;
 }
 
@@ -665,7 +796,10 @@ function buildFormSchema(): FormFieldDefinition[] {
     const fieldName = field.field.trim();
     const label = field.label.trim();
     if (!fieldName || !label || !field.type) throw new Error("动态表单需填写字段、名称和类型");
-    const defaultValue = parseDefaultValue(field.defaultValue, field.type);
+    const options = editableFormFieldOptions(field);
+    const defaultValueError = formFieldDefaultValueError(field, options);
+    if (defaultValueError) throw new Error(`动态表单字段「${fieldName}」${defaultValueError}`);
+    const defaultValue = parseFormFieldDefaultValue(field.defaultValue, field.type);
     return {
       field: fieldName,
       label,
@@ -673,7 +807,7 @@ function buildFormSchema(): FormFieldDefinition[] {
       required: field.required || undefined,
       defaultValue,
       unit: compactString(field.unit),
-      options: parseFormOptions(field.options)
+      options
     };
   });
   validateUnique(fields.map((field) => field.field), "动态表单字段");
@@ -695,14 +829,22 @@ async function load() {
   loading.value = true;
   try {
     nodeTypes.value = await listNodeTypes();
+    ensureNodeTypeAssets(nodeTypes.value);
   } finally {
     loading.value = false;
   }
 }
 
 async function submit() {
-  if (!form.id.trim() || !form.name.trim()) {
+  const typeCode = form.id.trim();
+  const typeName = form.name.trim();
+  if (!typeCode || !typeName) {
     ElMessage.error("请填写类型编码和名称");
+    return;
+  }
+
+  if (typeCodeError.value) {
+    ElMessage.error(typeCodeError.value);
     return;
   }
 
@@ -713,10 +855,13 @@ async function submit() {
 
   let payload: NodeTypeDefinition;
   try {
+    const editingNodeType = editingOriginalTypeCode.value
+      ? nodeTypes.value.find((item) => item.id === editingOriginalTypeCode.value)
+      : undefined;
     payload = {
       ...buildCustomExtensions(),
-      id: form.id.trim(),
-      name: form.name.trim(),
+      id: typeCode,
+      name: typeName,
       category: form.category,
       description: compactString(form.description),
       template: form.template.trim(),
@@ -736,7 +881,10 @@ async function submit() {
       groupStyleDefaults: buildGroupStyleDefaults(),
       annotationDefaults: buildAnnotationDefaults(),
       buttonDefaults: buildButtonDefaults(),
-      buttonStyleDefaults: buildButtonStyleDefaults()
+      buttonStyleDefaults: buildButtonStyleDefaults(),
+      backendId: editingBackendId.value ?? (editingNodeType ? backendIdOf(editingNodeType) : undefined),
+      enabled: editingNodeType?.enabled ?? true,
+      sortNo: editingNodeType?.sortNo
     };
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "配置校验失败");
@@ -778,12 +926,22 @@ async function handleImageChange(event: Event) {
 
   uploading.value = true;
   try {
-    const result = await uploadImageAsset(file);
+    const assetTarget = uploadingStatus.value && uploadingStatus.value !== "icon"
+      ? `status:${uploadingStatus.value}`
+      : "icon";
+    const result = await uploadImageAsset(file, {
+      businessType: form.category || "common",
+      source: "topology-node-type",
+      refType: "topology_node_type",
+      refId: form.id.trim(),
+      remark: assetTarget
+    });
     if (uploadingStatus.value && uploadingStatus.value !== "icon") {
-      form.statusImages[uploadingStatus.value] = result.url;
+      form.statusImages[uploadingStatus.value] = result.ref;
     } else {
-      form.icon = result.url;
+      form.icon = result.ref;
     }
+    await ensureAssetUrl(result.ref);
     ElMessage.success("图片已上传");
   } finally {
     uploading.value = false;
@@ -803,13 +961,27 @@ async function remove(nodeType: NodeTypeDefinition) {
 }
 
 onMounted(load);
+
+watch(() => [
+  form.icon,
+  ...Object.values(form.statusImages)
+], (values) => {
+  values.forEach((value) => void ensureAssetUrl(value));
+}, { immediate: true });
+
+// 容器能力仅对容器分类开放；切换到非容器分类时避免停留在已隐藏的 tab
+watch(() => form.category, (category) => {
+  if (category !== "container") {
+    form.isGroup = false;
+    if (activeConfigTab.value === "container") activeConfigTab.value = "base";
+  }
+});
 </script>
 
 <template>
   <main class="module-page">
     <header class="topbar">
       <span class="topbar-title">节点库管理</span>
-      <ModuleNav />
       <span class="topbar-spacer" />
       <el-button type="primary" @click="openCreate">新增节点类型</el-button>
       <el-button @click="load">刷新</el-button>
@@ -820,7 +992,7 @@ onMounted(load);
         <div class="module-card-header">
           <div>
             <div class="module-card-title">节点库</div>
-            <div class="module-card-subtitle">管理节点类型、模板、端口、动态表单和可绑定字段</div>
+            <div class="module-card-subtitle">管理节点类型、端口、动态表单和可绑定字段</div>
           </div>
         </div>
 
@@ -837,15 +1009,18 @@ onMounted(load);
           <el-table-column label="图片" width="76">
             <template #default="{ row }">
               <div class="node-type-icon">
-                <img v-if="isImageIcon(row.icon)" :src="row.icon" :alt="row.name" />
-                <span v-else>{{ row.icon || row.id.slice(0, 1).toUpperCase() }}</span>
+                <img v-if="isImageIcon(row.icon) && assetPreviewUrl(row.icon)" :src="assetPreviewUrl(row.icon)" :alt="row.name" />
+                <span v-else>{{ assetLabel(row.icon) || row.id.slice(0, 1).toUpperCase() }}</span>
               </div>
             </template>
           </el-table-column>
           <el-table-column prop="name" label="名称" min-width="160" />
           <el-table-column prop="id" label="类型编码" min-width="150" />
-          <el-table-column prop="category" label="分类" width="120" />
-          <el-table-column prop="template" label="模板" min-width="180" />
+          <el-table-column label="分类" width="120">
+            <template #default="{ row }">
+              {{ categoryLabelMap[row.category] ?? row.category ?? "-" }}
+            </template>
+          </el-table-column>
           <el-table-column label="默认尺寸" width="120">
             <template #default="{ row }">
               {{ row.defaultSize ? `${row.defaultSize.width} x ${row.defaultSize.height}` : "-" }}
@@ -871,18 +1046,21 @@ onMounted(load);
       <el-tabs v-model="activeConfigTab" class="config-tabs">
         <el-tab-pane name="base">
           <template #label>
-            基础信息
+            <NodeTypeTabHelpLabel label="基础信息" :summary="tabHelp.base" :items="tabFieldHelp.base" />
           </template>
+          <div class="config-pane">
+          <div class="config-pane-main">
           <el-form label-width="96px">
-            <el-form-item>
+            <el-form-item :validate-status="typeCodeError ? 'error' : undefined">
               <template #label>
-                类型编码
+                <span class="required-label"><span class="required-mark">*</span>类型编码</span>
               </template>
-              <el-input v-model="form.id" placeholder="例如 breaker" />
+              <el-input v-model="form.id" :disabled="!!editingOriginalTypeCode" placeholder="例如 breaker" />
+              <div v-if="typeCodeError" class="form-field-error" role="alert">{{ typeCodeError }}</div>
             </el-form-item>
             <el-form-item>
               <template #label>
-                名称
+                <span class="required-label"><span class="required-mark">*</span>名称</span>
               </template>
               <el-input v-model="form.name" placeholder="例如 断路器" />
             </el-form-item>
@@ -901,12 +1079,6 @@ onMounted(load);
                 </el-select>
                 <el-button @click="applyCategoryDefaultSize">使用默认尺寸</el-button>
               </div>
-            </el-form-item>
-            <el-form-item>
-              <template #label>
-                模板
-              </template>
-              <el-input v-model="form.template" placeholder="basicEquipmentTemplate" />
             </el-form-item>
             <el-form-item>
               <template #label>
@@ -930,8 +1102,8 @@ onMounted(load);
               </template>
               <div class="icon-upload-row">
                 <div class="icon-preview">
-                  <img v-if="isImageIcon(form.icon)" :src="form.icon" :alt="iconFieldLabel" />
-                  <span v-else>{{ form.icon || "无" }}</span>
+                  <img v-if="isImageIcon(form.icon) && assetPreviewUrl(form.icon)" :src="assetPreviewUrl(form.icon)" :alt="iconFieldLabel" />
+                  <span v-else>{{ assetLabel(form.icon) || "无" }}</span>
                 </div>
                 <div class="icon-upload-actions">
                   <el-input v-model="form.icon" :placeholder="iconFieldPlaceholder" />
@@ -957,8 +1129,12 @@ onMounted(load);
                 <div v-for="status in statusOptions" :key="status.value" class="status-image-item">
                   <div class="status-image-title">{{ status.label }}</div>
                   <div class="icon-preview">
-                    <img v-if="isImageIcon(form.statusImages[status.value])" :src="form.statusImages[status.value]" :alt="status.label" />
-                    <span v-else>{{ form.statusImages[status.value] || "无" }}</span>
+                    <img
+                      v-if="isImageIcon(form.statusImages[status.value]) && assetPreviewUrl(form.statusImages[status.value])"
+                      :src="assetPreviewUrl(form.statusImages[status.value])"
+                      :alt="status.label"
+                    />
+                    <span v-else>{{ assetLabel(form.statusImages[status.value]) || "无" }}</span>
                   </div>
                   <el-input v-model="form.statusImages[status.value]" placeholder="状态图片地址" />
                   <div class="icon-upload-buttons">
@@ -980,6 +1156,45 @@ onMounted(load);
                   文字大小
                 </template>
                 <el-input-number v-model="form.annotationTextSize" :min="1" controls-position="right" />
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  字重
+                </template>
+                <el-select v-model="form.annotationFontWeight" style="width: 100%;">
+                  <el-option v-for="option in annotationFontWeightOptions" :key="option.value" :label="option.label" :value="option.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  字形
+                </template>
+                <el-select v-model="form.annotationFontStyle" style="width: 100%;">
+                  <el-option label="常规" value="normal" />
+                  <el-option label="斜体" value="italic" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  装饰线
+                </template>
+                <el-select v-model="form.annotationTextDecoration" style="width: 100%;">
+                  <el-option v-for="option in annotationTextDecorationOptions" :key="option.value" :label="option.label" :value="option.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  对齐
+                </template>
+                <el-select v-model="form.annotationTextAlign" style="width: 100%;">
+                  <el-option v-for="option in annotationTextAlignOptions" :key="option.value" :label="option.label" :value="option.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label>
+                  行高
+                </template>
+                <el-input-number v-model="form.annotationLineHeight" :min="1" controls-position="right" />
               </el-form-item>
             </template>
             <template v-if="form.category === 'control'">
@@ -1049,21 +1264,16 @@ onMounted(load);
               </el-form-item>
             </template>
           </el-form>
-          <div class="tab-help-panel">
-            <div class="tab-help-summary">{{ tabHelp.base }}</div>
-            <dl class="field-help-list">
-              <div v-for="item in tabFieldHelp.base" :key="item.label" class="field-help-item">
-                <dt>{{ item.label }}</dt>
-                <dd>{{ item.text }}</dd>
-              </div>
-            </dl>
+          </div>
           </div>
         </el-tab-pane>
 
-        <el-tab-pane name="container">
+        <el-tab-pane v-if="form.category === 'container'" name="container">
           <template #label>
-            容器能力
+            <NodeTypeTabHelpLabel label="容器能力" :summary="tabHelp.container" :items="tabFieldHelp.container" />
           </template>
+          <div class="config-pane">
+          <div class="config-pane-main">
           <el-form label-width="112px">
             <el-form-item>
               <template #label>
@@ -1127,21 +1337,16 @@ onMounted(load);
               </div>
             </el-form-item>
           </el-form>
-          <div class="tab-help-panel">
-            <div class="tab-help-summary">{{ tabHelp.container }}</div>
-            <dl class="field-help-list">
-              <div v-for="item in tabFieldHelp.container" :key="item.label" class="field-help-item">
-                <dt>{{ item.label }}</dt>
-                <dd>{{ item.text }}</dd>
-              </div>
-            </dl>
+          </div>
           </div>
         </el-tab-pane>
 
         <el-tab-pane name="ports">
           <template #label>
-            端口配置
+            <NodeTypeTabHelpLabel label="端口配置" :summary="tabHelp.ports" :items="tabFieldHelp.ports" />
           </template>
+          <div class="config-pane">
+          <div class="config-pane-main">
           <section class="table-section">
             <div class="section-toolbar">
               <span class="section-title">端口</span>
@@ -1166,6 +1371,20 @@ onMounted(load);
                   </el-select>
                 </template>
               </el-table-column>
+              <el-table-column width="100">
+                <template #header>所在边</template>
+                <template #default="{ row }">
+                  <el-select v-model="row.side">
+                    <el-option v-for="option in portSideOptions" :key="option.value" :label="option.label" :value="option.value" />
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column width="140">
+                <template #header>位置(%)</template>
+                <template #default="{ row }">
+                  <el-input-number v-model="row.positionPercent" :min="0" :max="100" :step="1" :precision="0" controls-position="right" />
+                </template>
+              </el-table-column>
               <el-table-column width="110">
                 <template #header>最大连接</template>
                 <template #default="{ row }"><el-input v-model="row.maxLinks" placeholder="1" /></template>
@@ -1179,21 +1398,16 @@ onMounted(load);
               </el-table-column>
             </el-table>
           </section>
-          <div class="tab-help-panel">
-            <div class="tab-help-summary">{{ tabHelp.ports }}</div>
-            <dl class="field-help-list">
-              <div v-for="item in tabFieldHelp.ports" :key="item.label" class="field-help-item">
-                <dt>{{ item.label }}</dt>
-                <dd>{{ item.text }}</dd>
-              </div>
-            </dl>
+          </div>
           </div>
         </el-tab-pane>
 
         <el-tab-pane name="form">
           <template #label>
-            动态表单
+            <NodeTypeTabHelpLabel label="动态表单" :summary="tabHelp.form" :items="tabFieldHelp.form" />
           </template>
+          <div class="config-pane">
+          <div class="config-pane-main">
           <section class="table-section">
             <div class="section-toolbar">
               <span class="section-title">节点属性表单字段</span>
@@ -1223,7 +1437,52 @@ onMounted(load);
               </el-table-column>
               <el-table-column min-width="130">
                 <template #header>默认值</template>
-                <template #default="{ row }"><el-input v-model="row.defaultValue" placeholder="默认值" /></template>
+                <template #default="{ row }">
+                  <div class="default-value-cell" :class="{ 'default-value-cell--error': formFieldDefaultError(row) }">
+                    <el-input v-if="row.type === 'text'" v-model="row.defaultValue" placeholder="默认值" />
+                    <el-input v-else-if="row.type === 'textarea'" v-model="row.defaultValue" type="textarea" :rows="2" placeholder="默认值" />
+                    <el-input-number
+                      v-else-if="row.type === 'number'"
+                      :model-value="numberFormFieldDefaultValue(row.defaultValue)"
+                      controls-position="right"
+                      @update:model-value="updateDefaultValue(row, $event)"
+                    />
+                    <el-select
+                      v-else-if="row.type === 'select'"
+                      :model-value="row.defaultValue"
+                      placeholder="请选择默认值"
+                      @update:model-value="updateDefaultValue(row, $event)"
+                    >
+                      <el-option v-if="row.defaultValue && !isSelectDefaultValueMatched(row)" :label="`无效默认值：${row.defaultValue}`" :value="row.defaultValue" disabled />
+                      <el-option v-for="option in editableFormFieldOptions(row) ?? []" :key="String(option.value)" :label="option.label" :value="String(option.value)" />
+                    </el-select>
+                    <el-date-picker
+                      v-else-if="row.type === 'date'"
+                      :model-value="row.defaultValue || undefined"
+                      type="date"
+                      value-format="YYYY-MM-DD"
+                      placeholder="选择日期"
+                      @update:model-value="updateDefaultValue(row, $event)"
+                    />
+                    <el-select
+                      v-else-if="row.type === 'boolean'"
+                      :model-value="row.defaultValue"
+                      @update:model-value="updateDefaultValue(row, $event)"
+                    >
+                      <el-option label="未设置" value="" />
+                      <el-option label="是" value="true" />
+                      <el-option label="否" value="false" />
+                    </el-select>
+                    <el-color-picker
+                      v-else-if="row.type === 'color'"
+                      :model-value="colorFormFieldDefaultValue(row.defaultValue)"
+                      color-format="hex"
+                      @update:model-value="updateDefaultValue(row, $event)"
+                    />
+                    <el-input v-else v-model="row.defaultValue" placeholder="默认值" />
+                    <span v-if="formFieldDefaultError(row)" class="form-field-error">{{ formFieldDefaultError(row) }}</span>
+                  </div>
+                </template>
               </el-table-column>
               <el-table-column width="100">
                 <template #header>单位</template>
@@ -1238,21 +1497,16 @@ onMounted(load);
               </el-table-column>
             </el-table>
           </section>
-          <div class="tab-help-panel">
-            <div class="tab-help-summary">{{ tabHelp.form }}</div>
-            <dl class="field-help-list">
-              <div v-for="item in tabFieldHelp.form" :key="item.label" class="field-help-item">
-                <dt>{{ item.label }}</dt>
-                <dd>{{ item.text }}</dd>
-              </div>
-            </dl>
+          </div>
           </div>
         </el-tab-pane>
 
         <el-tab-pane name="custom">
           <template #label>
-            自定义扩展
+            <NodeTypeTabHelpLabel label="自定义扩展" :summary="tabHelp.custom" :items="tabFieldHelp.custom" />
           </template>
+          <div class="config-pane">
+          <div class="config-pane-main">
           <section class="table-section">
             <div class="section-toolbar">
               <span class="section-title">未知扩展字段</span>
@@ -1275,11 +1529,19 @@ onMounted(load);
               <el-table-column min-width="360">
                 <template #header>值</template>
                 <template #default="{ row }">
+                  <JsonTextEditor
+                    v-if="row.type === 'object'"
+                    :model-value="customExtensionObjectValue(row)"
+                    :height="120"
+                    placeholder='{ "key": "value" }'
+                    @update:model-value="updateCustomExtensionObject(row, $event)"
+                  />
                   <el-input
+                    v-else
                     v-model="row.value"
                     type="textarea"
                     :rows="3"
-                    :placeholder="row.type === 'object' ? '{ &quot;key&quot;: &quot;value&quot; }' : '文本、数字、布尔或一行一个数组值'"
+                    placeholder="文本、数字、布尔或一行一个数组值"
                   />
                 </template>
               </el-table-column>
@@ -1288,14 +1550,7 @@ onMounted(load);
               </el-table-column>
             </el-table>
           </section>
-          <div class="tab-help-panel">
-            <div class="tab-help-summary">{{ tabHelp.custom }}</div>
-            <dl class="field-help-list">
-              <div v-for="item in tabFieldHelp.custom" :key="item.label" class="field-help-item">
-                <dt>{{ item.label }}</dt>
-                <dd>{{ item.text }}</dd>
-              </div>
-            </dl>
+          </div>
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -1309,6 +1564,25 @@ onMounted(load);
 </template>
 
 <style scoped>
+.required-label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.required-mark {
+  margin-right: 4px;
+  color: var(--el-color-danger);
+  font-weight: 700;
+}
+
+.form-field-error {
+  width: 100%;
+  margin-top: 4px;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
 .node-type-icon,
 .icon-preview {
   display: inline-grid;
@@ -1334,53 +1608,70 @@ onMounted(load);
   padding: 0 12px;
 }
 
-.config-tabs {
-  min-height: 520px;
+/* ===== 编辑弹窗容器 ===== */
+.node-type-dialog :deep(.el-dialog) {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgb(15 23 42 / 18%);
 }
 
-.tab-help-panel {
-  display: grid;
-  gap: 10px;
-  margin-top: 16px;
-  padding: 12px;
-  color: #475569;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
+.node-type-dialog :deep(.el-dialog__header) {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 16px 22px;
+  background: linear-gradient(180deg, #f8fafc, #ffffff);
+  border-bottom: 1px solid #eef0f4;
 }
 
-.tab-help-summary {
+.node-type-dialog :deep(.el-dialog__title) {
+  position: relative;
+  padding-left: 12px;
   color: #0f172a;
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 700;
+  line-height: 1.2;
 }
 
-.field-help-list {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 14px;
-  margin: 0;
+.node-type-dialog :deep(.el-dialog__title)::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 4px;
+  height: 16px;
+  transform: translateY(-50%);
+  background: var(--el-color-primary, #009688);
+  border-radius: 2px;
 }
 
-.field-help-item {
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-  min-width: 0;
+.node-type-dialog :deep(.el-dialog__headerbtn) {
+  top: 14px;
 }
 
-.field-help-item dt {
-  color: #334155;
-  font-size: 12px;
-  font-weight: 700;
+.node-type-dialog :deep(.el-dialog__body) {
+  padding: 6px 22px 0;
 }
 
-.field-help-item dd {
-  margin: 0;
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.5;
+.node-type-dialog :deep(.el-dialog__footer) {
+  padding: 14px 22px;
+  background: #fbfcfd;
+  border-top: 1px solid #eef0f4;
+}
+
+/* ===== 配置 Tabs ===== */
+.config-tabs :deep(.el-tabs__header) {
+  margin-bottom: 14px;
+}
+
+.config-tabs :deep(.el-tabs__nav-wrap)::after {
+  height: 1px;
+  background: #eef0f4;
+}
+
+.config-tabs :deep(.el-tabs__item) {
+  font-weight: 600;
 }
 
 .icon-upload-row {
@@ -1496,5 +1787,41 @@ onMounted(load);
 
 .field-table {
   width: 100%;
+  border: 1px solid #e6eaf0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.field-table :deep(thead th.el-table__cell) {
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 700;
+}
+
+/* 表格内数字步进器（如端口「位置」列）撑满列宽并左对齐，与相邻文本输入列保持一致 */
+.field-table :deep(.el-input-number) {
+  width: 100%;
+}
+
+.field-table :deep(.el-input-number .el-input__inner) {
+  text-align: left;
+}
+
+.default-value-cell {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+.default-value-cell :deep(.el-select),
+.default-value-cell :deep(.el-date-editor) {
+  width: 100%;
+}
+
+.default-value-cell--error :deep(.el-input__wrapper),
+.default-value-cell--error :deep(.el-select__wrapper),
+.default-value-cell--error :deep(.el-textarea__inner),
+.default-value-cell--error :deep(.el-color-picker__trigger) {
+  box-shadow: 0 0 0 1px var(--el-color-danger) inset;
 }
 </style>

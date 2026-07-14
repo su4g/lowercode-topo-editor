@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { createExpressionContext, evaluateExpressionConditionGroup, isConditionGroup, normalizeExpressionPath, readExpressionPath, resolveExpressionValue, resolveTemplateString, type ConditionGroup, type DataSourceReference, type DisplayRule, type ExpressionContext, type LinkRuntime, type LinkRuntimeRule, type NodeRuntime, type NodeTypeDefinition, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { createExpressionContext, defaultRuntimeSource, findNodeByRuleIdentity, isConditionGroup, nodeIdentifier, nodeRuleIdentityCandidates, normalizeExpressionPath, readExpressionPath, resolveExpressionValue, resolveLinkRuntimeWithTrace, resolveNodeRuntimeWithTrace, resolveTemplateString, type ConditionGroup, type DataSourceReference, type ExpressionContext, type LinkRuntime, type NodeRuntime, type NodeTypeDefinition, type RuleOverviewGroup, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { ElMessage } from "element-plus";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { ArrowLeft, Connection, Edit, Refresh, Tickets } from "@element-plus/icons-vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import ModuleNav from "../components/ModuleNav.vue";
+import JsonTextEditor from "../components/JsonTextEditor.vue";
+import RuleOverviewPanel from "../components/RuleOverviewPanel/index.vue";
 import TopologyCanvas from "../components/TopologyCanvas/index.vue";
-import { listNodeTypes } from "../services/nodeTypeApi";
+import { listEnabledNodeTypes } from "../services/nodeTypeApi";
 import { queryRuntime } from "../services/runtimeApi";
 import { getTopology } from "../services/topologyApi";
 
@@ -30,10 +32,24 @@ const eventContext = computed(() => {
 const isPreview = computed(() => route.query.preview === "1");
 const isDebugRuntime = computed(() => isPreview.value || route.query.debug === "1");
 const previewApiDialogVisible = ref(false);
-const previewMockTexts = ref<Record<string, string>>({});
+const canvasPreviewTheme = ref<"light" | "dark">("light");
+const previewMockData = ref<Record<string, Record<string, unknown>>>({});
 const previewApplying = ref(false);
 const previewDataSources = computed(() => currentTemplateTopology()?.dataSources ?? []);
 const previewEventLogs = ref<PreviewEventLog[]>([]);
+const ruleOverviewOpen = ref(false);
+const canvasRef = ref<{
+  applyRuntimePatch: (patch: {
+    nodes: Array<{ key: string; runtime: TopologyNode["runtime"] }>;
+    links: Array<{ key: string; runtime: TopologyLink["runtime"] }>;
+  }) => boolean;
+} | null>(null);
+let lastFullyAppliedBase: TopologyData | null = null;
+const initialLoading = ref(false);
+const loadProgress = ref(0);
+const loadStage = ref("");
+const canvasReady = ref(false);
+let canvasReadyResolver: (() => void) | null = null;
 let timer: number | undefined;
 let wsConnections: WebSocket[] = [];
 let wsHeartbeatTimers: number[] = [];
@@ -52,6 +68,25 @@ type PreviewEventLog = {
   bindNodeKey?: string;
   data: Record<string, unknown>;
 };
+
+function resetCanvasReady() {
+  canvasReady.value = false;
+  canvasReadyResolver?.();
+  canvasReadyResolver = null;
+}
+
+function handleCanvasReady() {
+  canvasReady.value = true;
+  canvasReadyResolver?.();
+  canvasReadyResolver = null;
+}
+
+function waitForCanvasReady() {
+  if (canvasReady.value) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    canvasReadyResolver = resolve;
+  });
+}
 
 type ParentParamWindow = Window & {
   __TOPOLOGY_PARENT_PARAMS__?: Record<string, string | number | boolean>;
@@ -77,17 +112,19 @@ function readExpressionMetaData() {
 }
 
 function readPreviewTopology(id: string) {
-  const raw = sessionStorage.getItem(`topology-preview:${id}`);
+  const raw = sessionStorage.getItem(`topology-preview:${id}`) ?? sessionStorage.getItem("topology-preview:last");
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as TopologyData;
+    const data = JSON.parse(raw) as TopologyData;
+    return data.id === id ? data : { ...data, id };
   } catch {
     return null;
   }
 }
 
 function cloneTopology(data: TopologyData) {
-  return JSON.parse(JSON.stringify(data)) as TopologyData;
+  // 入参始终是接口 / sessionStorage 反序列化出的纯 JSON 对象，structuredClone 比 JSON 往返更快
+  return structuredClone(data);
 }
 
 function currentTemplateTopology() {
@@ -96,6 +133,10 @@ function currentTemplateTopology() {
 
 function jsonText(value: unknown) {
   return JSON.stringify(value ?? {}, null, 2);
+}
+
+function jsonObject(value: unknown) {
+  return isRecord(value) ? value : {};
 }
 
 function nodeTypeName(typeId: string) {
@@ -138,29 +179,17 @@ function clearPreviewEventLogs() {
   previewEventLogs.value = [];
 }
 
-function parseJsonObject(value: string, fallbackLabel: string) {
-  try {
-    const parsed = value.trim() ? JSON.parse(value) : {};
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      ElMessage.error(`${fallbackLabel} 必须是 JSON 对象`);
-      return null;
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    ElMessage.error(`${fallbackLabel} 不是合法 JSON`);
-    return null;
-  }
-}
-
 function persistPreviewTopology() {
   if (!isPreview.value || !templateTopology.value) return;
-  sessionStorage.setItem(`topology-preview:${templateTopology.value.id}`, JSON.stringify(templateTopology.value));
+  const previewPayload = JSON.stringify(templateTopology.value);
+  sessionStorage.setItem(`topology-preview:${templateTopology.value.id}`, previewPayload);
+  sessionStorage.setItem("topology-preview:last", previewPayload);
 }
 
 function resetPreviewMockDrafts() {
-  previewMockTexts.value = Object.fromEntries((currentTemplateTopology()?.dataSources ?? []).map((source, index) => [
+  previewMockData.value = Object.fromEntries((currentTemplateTopology()?.dataSources ?? []).map((source, index) => [
     String(index),
-    jsonText(source.config?.mockData ?? source.config?.data)
+    jsonObject(source.config?.mockData ?? source.config?.data)
   ]));
 }
 
@@ -169,9 +198,9 @@ function openPreviewApiDialog() {
   previewApiDialogVisible.value = true;
 }
 
-function updatePreviewMockDraft(index: number, value: string) {
-  previewMockTexts.value = {
-    ...previewMockTexts.value,
+function updatePreviewMockDraft(index: number, value: Record<string, unknown>) {
+  previewMockData.value = {
+    ...previewMockData.value,
     [String(index)]: value
   };
 }
@@ -182,13 +211,11 @@ async function applyPreviewMockData() {
 
   const nextDataSources: DataSourceReference[] = [];
   for (const [index, source] of (base.dataSources ?? []).entries()) {
-    const parsed = parseJsonObject(previewMockTexts.value[String(index)] ?? "{}", `${source.sourceId || source.name || `接口 ${index + 1}`} Mock`);
-    if (!parsed) return;
     nextDataSources.push({
       ...source,
       config: {
         ...(source.config ?? {}),
-        mockData: parsed
+        mockData: previewMockData.value[String(index)] ?? {}
       }
     });
   }
@@ -200,7 +227,7 @@ async function applyPreviewMockData() {
       dataSources: nextDataSources
     };
     persistPreviewTopology();
-    await refreshRuntime();
+    await safeRefreshRuntime(true);
     ElMessage.success("预览 Mock 已应用");
   } finally {
     previewApplying.value = false;
@@ -258,7 +285,7 @@ function collectRuntimeQuery(data: TopologyData) {
           continue;
         }
         if (!shouldQueryRuntimeField(data, target, metaData)) continue;
-        const ruleNode = data.nodes.find((item) => item.key === target);
+        const ruleNode = findRuntimeNode(data, target);
         if (ruleNode?.dataBinding?.sourceId) {
           if (!isDebugRuntime.value && isWebSocketSource(data, ruleNode.dataBinding.sourceId)) continue;
           sourceIds.add(ruleNode.dataBinding.sourceId);
@@ -291,7 +318,7 @@ function collectRuntimeQuery(data: TopologyData) {
           continue;
         }
         if (!shouldQueryRuntimeField(data, target, metaData)) continue;
-        const node = data.nodes.find((item) => item.key === target);
+        const node = findRuntimeNode(data, target);
         if (node?.dataBinding?.sourceId) {
           if (!isDebugRuntime.value && isWebSocketSource(data, node.dataBinding.sourceId)) continue;
           sourceIds.add(node.dataBinding.sourceId);
@@ -316,11 +343,6 @@ function collectRuntimeQuery(data: TopologyData) {
 
 function dataSourceById(data: TopologyData, sourceId: string) {
   return data.dataSources?.find((source) => source.sourceId === sourceId);
-}
-
-function defaultRuntimeSource(data: TopologyData) {
-  const sources = (data.dataSources ?? []).filter((source) => source.enabled !== false);
-  return sources.length === 1 ? sources[0] : null;
 }
 
 function isWebSocketSource(data: TopologyData, sourceId: string) {
@@ -349,7 +371,7 @@ function splitRuntimeField(field: string) {
 
 function shouldQueryRuntimeField(data: TopologyData, target: string, metaData: Record<string, unknown>) {
   if (["metaData", "mateData", "runtimeData"].includes(target)) return false;
-  const isKnownRuntimeTarget = data.nodes.some((node) => node.key === target)
+  const isKnownRuntimeTarget = Boolean(findRuntimeNode(data, target))
     || data.dataSources?.some((source) => source.sourceId === target);
   return isKnownRuntimeTarget || !(target in metaData);
 }
@@ -358,23 +380,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeKey(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function configuredNodeIdentifier(node: TopologyNode) {
-  const identifier = node.props?.identifier;
-  return typeof identifier === "string" ? identifier.trim() : "";
+function findRuntimeNode(data: TopologyData, target: string) {
+  return findNodeByRuleIdentity(data.nodes, target);
 }
 
 function nodeDataKeys(node: TopologyNode) {
-  return [configuredNodeIdentifier(node), node.key, node.label, node.typeId]
-    .filter(Boolean)
-    .flatMap((value) => {
-      const text = String(value);
-      return [text, text.toLowerCase(), normalizeKey(text)];
-    })
-    .filter(Boolean);
+  return nodeRuleIdentityCandidates(node);
+}
+
+function writeNodeFieldAliases(context: ExpressionContext, node: TopologyNode, field: string, value: unknown) {
+  context[`${node.key}.${field}`] = value;
+  const identifier = nodeIdentifier(node);
+  if (identifier) context[`${identifier}.${field}`] = value;
 }
 
 function readDefaultNodeField(sourceData: Record<string, unknown>, node: TopologyNode, fieldName: string) {
@@ -399,7 +416,7 @@ function exposeNodeFieldsFromRecord(context: ExpressionContext, node: TopologyNo
   const candidates = nodeDataKeys(node);
   for (const fieldName of ["status", "state"]) {
     const value = readDefaultNodeField(sourceData, node, fieldName);
-    if (value !== undefined) context[`${node.key}.${fieldName}`] = value;
+    if (value !== undefined) writeNodeFieldAliases(context, node, fieldName, value);
   }
   for (const key of candidates) {
     const directRecord = readExpressionPath(sourceData, key);
@@ -407,9 +424,14 @@ function exposeNodeFieldsFromRecord(context: ExpressionContext, node: TopologyNo
     const record = isRecord(dataRecord) ? dataRecord : isRecord(directRecord) ? directRecord : null;
     if (!record) continue;
     for (const [field, value] of Object.entries(record)) {
-      context[`${node.key}.${field}`] = value;
+      writeNodeFieldAliases(context, node, field, value);
       context[`${node.key}.${key}.${field}`] = value;
       context[`${node.key}.data.${key}.${field}`] = value;
+      const identifier = nodeIdentifier(node);
+      if (identifier) {
+        context[`${identifier}.${key}.${field}`] = value;
+        context[`${identifier}.data.${key}.${field}`] = value;
+      }
     }
   }
 }
@@ -510,30 +532,6 @@ function buildDefaultLinkRuntime(link: TopologyLink): LinkRuntime {
   };
 }
 
-function applyLinkRule(runtime: LinkRuntime, rule: LinkRuntimeRule): LinkRuntime {
-  const style = rule.action.style;
-  return {
-    ...runtime,
-    state: rule.action.state ?? runtime.state,
-    ...style,
-    flow: style?.flow ? { ...(runtime.flow ?? {}), ...style.flow } : runtime.flow,
-    glow: style?.glow ? { ...(runtime.glow ?? {}), ...style.glow } : runtime.glow
-  };
-}
-
-function applyNodeRule(runtime: NodeRuntime, rule: DisplayRule): NodeRuntime {
-  return {
-    ...runtime,
-    visible: rule.action.visible ?? runtime.visible,
-    status: rule.action.status ?? runtime.status,
-    color: rule.action.color ?? runtime.color,
-    text: rule.action.text ?? runtime.text,
-    backgroundColor: rule.action.backgroundColor ?? runtime.backgroundColor,
-    borderColor: rule.action.borderColor ?? runtime.borderColor,
-    opacity: rule.action.opacity ?? runtime.opacity
-  };
-}
-
 function buildRuleCleanNodeRuntime(node: TopologyNode, text?: string): NodeRuntime {
   const baseRuntime: NodeRuntime = {
     ...node.runtime,
@@ -555,26 +553,65 @@ function buildRuleCleanNodeRuntime(node: TopologyNode, text?: string): NodeRunti
 }
 
 function resolveLinkRuntime(link: TopologyLink, context: ExpressionContext): LinkRuntime {
-  return [...(link.rules ?? [])]
-    .sort((left, right) => left.priority - right.priority)
-    .reduce((nextRuntime, rule) => {
-      return evaluateExpressionConditionGroup(rule.condition, context)
-        ? applyLinkRule(nextRuntime, rule)
-        : nextRuntime;
-    }, buildDefaultLinkRuntime(link));
+  return resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link)).runtime;
 }
 
 function resolveNodeRuntime(node: TopologyNode, context: ExpressionContext, text?: string): NodeRuntime {
-  const baseRuntime = buildRuleCleanNodeRuntime(node, text);
-
-  return [...(node.displayRules ?? [])]
-    .sort((left, right) => left.priority - right.priority)
-    .reduce((nextRuntime, rule) => {
-      return evaluateExpressionConditionGroup(rule.condition, context)
-        ? applyNodeRule(nextRuntime, rule)
-        : nextRuntime;
-    }, baseRuntime);
+  return resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node, text)).runtime;
 }
+
+// 规则总览使用与画布完全一致的求值上下文，随运行快照变化自动刷新
+const runtimeEvalContext = computed<ExpressionContext>(() => {
+  const base = currentTemplateTopology();
+  if (!base) return {};
+  return buildRuntimeContext(base, lastRuntimeSnapshot.value, readExpressionMetaData());
+});
+
+function countEvaluations(evaluations: RuleOverviewGroup["evaluations"]) {
+  return {
+    active: evaluations.filter((item) => item.status === "active").length,
+    overridden: evaluations.filter((item) => item.status === "overridden").length,
+    inactive: evaluations.filter((item) => item.status === "inactive").length,
+    total: evaluations.length
+  };
+}
+
+const ruleOverview = computed<{ nodes: RuleOverviewGroup[]; links: RuleOverviewGroup[] }>(() => {
+  // computed 惰性求值：面板关闭时不会被读取，对轮询性能零影响
+  const base = currentTemplateTopology();
+  if (!ruleOverviewOpen.value || !base) return { nodes: [], links: [] };
+  const context = runtimeEvalContext.value;
+
+  const nodes = base.nodes.map((node) => {
+    const { runtime, evaluations } = resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node));
+    return {
+      kind: "node" as const,
+      key: node.key,
+      label: node.label || node.key,
+      typeName: node.isGroup ? "分组" : nodeTypeName(node.typeId),
+      statusText: (runtime as NodeRuntime & { state?: string }).status ?? "默认",
+      visible: runtime.visible !== false,
+      evaluations,
+      counts: countEvaluations(evaluations)
+    };
+  });
+
+  const links = base.links.map((link) => {
+    const { runtime, evaluations } = resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link));
+    return {
+      kind: "link" as const,
+      key: link.key,
+      label: selectedLinkLabel(link),
+      typeName: "连线",
+      statusText: runtime.state ?? link.defaultState ?? "默认",
+      visible: runtime.visible !== false,
+      evaluations,
+      counts: countEvaluations(evaluations)
+    };
+  });
+
+  return { nodes, links };
+});
 
 function resolveRecord<T extends Record<string, unknown>>(value: T | undefined, context: ExpressionContext) {
   return resolveExpressionValue(value ?? {}, context) as T;
@@ -678,6 +715,27 @@ function openWebSocketSources() {
   }
 }
 
+function resolveRuntimeNodeText(node: TopologyNode, runtime: Record<string, unknown>, runtimeContext: ExpressionContext) {
+  const sourceId = node.dataBinding?.sourceId;
+  const sourceData = sourceId ? runtime[sourceId] as Record<string, unknown> | undefined : undefined;
+
+  const values = sourceData
+    ? Object.fromEntries(Object.entries(node.dataBinding?.mappings ?? {}).map(([name, path]) => [name, readMappedRuntimeValue(sourceData, path)]))
+    : {};
+  const textTemplate = typeof node.props?.textTemplate === "string" ? node.props.textTemplate : undefined;
+  return textTemplate
+    ? resolveTemplateString(textTemplate, {
+      ...runtimeContext,
+      ...values,
+      node: values
+    })
+    : node.runtime?.text;
+}
+
+function runtimeSignature(value: unknown) {
+  return JSON.stringify(value ?? null);
+}
+
 function applyRuntimeData(runtime: Record<string, unknown>) {
   const base = currentTemplateTopology();
   if (!base) return;
@@ -685,34 +743,52 @@ function applyRuntimeData(runtime: Record<string, unknown>) {
   const metaData = readExpressionMetaData();
   const runtimeContext = buildRuntimeContext(base, runtime, metaData);
 
-  topology.value = {
-    ...base,
-    nodes: base.nodes.map((node: TopologyNode) => {
-      const sourceId = node.dataBinding?.sourceId;
-      const sourceData = sourceId ? runtime[sourceId] as Record<string, unknown> | undefined : undefined;
+  const nextNodeRuntimes = base.nodes.map((node: TopologyNode) => ({
+    key: node.key,
+    runtime: resolveNodeRuntime(node, runtimeContext, resolveRuntimeNodeText(node, runtime, runtimeContext))
+  }));
+  const nextLinkRuntimes = base.links.map((link) => ({
+    key: link.key,
+    runtime: resolveLinkRuntime(link, runtimeContext)
+  }));
 
-      const values = sourceData
-        ? Object.fromEntries(Object.entries(node.dataBinding?.mappings ?? {}).map(([name, path]) => [name, readMappedRuntimeValue(sourceData, path)]))
-        : {};
-      const textTemplate = typeof node.props?.textTemplate === "string" ? node.props.textTemplate : undefined;
-      const text = textTemplate
-        ? resolveTemplateString(textTemplate, {
-          ...runtimeContext,
-          ...values,
-          node: values
-        })
-        : node.runtime?.text;
+  // 模板未变且结构一致时走增量补丁，避免整棵 GoJS 模型重建与视口重置
+  const current = topology.value;
+  const canPatchIncrementally = current
+    && lastFullyAppliedBase === base
+    && current.nodes.length === base.nodes.length
+    && current.links.length === base.links.length;
 
-      return {
-        ...node,
-        runtime: resolveNodeRuntime(node, runtimeContext, text)
-      };
-    }),
-    links: base.links.map((link) => ({
-      ...link,
-      runtime: resolveLinkRuntime(link, runtimeContext)
-    }))
-  };
+  if (!canPatchIncrementally) {
+    topology.value = {
+      ...base,
+      nodes: base.nodes.map((node, index) => ({ ...node, runtime: nextNodeRuntimes[index].runtime })),
+      links: base.links.map((link, index) => ({ ...link, runtime: nextLinkRuntimes[index].runtime }))
+    };
+    lastFullyAppliedBase = base;
+    return;
+  }
+
+  const nodePatches = nextNodeRuntimes.filter((item, index) => runtimeSignature(item.runtime) !== runtimeSignature(current.nodes[index].runtime));
+  const linkPatches = nextLinkRuntimes.filter((item, index) => runtimeSignature(item.runtime) !== runtimeSignature(current.links[index].runtime));
+  if (!nodePatches.length && !linkPatches.length) return;
+
+  const applied = canvasRef.value?.applyRuntimePatch({ nodes: nodePatches, links: linkPatches }) ?? false;
+  // 原地更新 runtime：引用不变使画布 watcher 不触发，深层响应式保证检查面板实时刷新
+  const nodesByKey = new Map(current.nodes.map((node) => [node.key, node]));
+  const linksByKey = new Map(current.links.map((link) => [link.key, link]));
+  for (const { key, runtime: nodeRuntime } of nodePatches) {
+    const node = nodesByKey.get(key);
+    if (node) node.runtime = nodeRuntime;
+  }
+  for (const { key, runtime: linkRuntime } of linkPatches) {
+    const link = linksByKey.get(key);
+    if (link) link.runtime = linkRuntime;
+  }
+  if (!applied) {
+    topology.value = { ...current, nodes: [...current.nodes], links: [...current.links] };
+    lastFullyAppliedBase = base;
+  }
 }
 
 async function refreshRuntime() {
@@ -735,6 +811,15 @@ async function refreshRuntime() {
   });
 }
 
+async function safeRefreshRuntime(showWarning = false) {
+  try {
+    await refreshRuntime();
+  } catch {
+    applyRuntimeData(wsRuntimeData.value);
+    if (showWarning) ElMessage.warning("运行数据加载失败，已保留拓扑画布");
+  }
+}
+
 function runtimePollingInterval() {
   const intervals = (currentTemplateTopology()?.dataSources ?? [])
     .filter((source) => source.enabled !== false && (isDebugRuntime.value || source.type !== "websocket"))
@@ -743,44 +828,111 @@ function runtimePollingInterval() {
   return intervals.length ? Math.min(...intervals) : 0;
 }
 
+async function nextPaintFrame() {
+  await nextTick();
+  await new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve(null));
+  });
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden && topology.value) void safeRefreshRuntime();
+}
+
 onMounted(async () => {
-  nodeTypes.value = await listNodeTypes();
-  const id = String(route.params.id ?? "");
+  const id = typeof route.query.id === "string" && route.query.id ? route.query.id : "";
   if (!id) {
     ElMessage.warning("缺少拓扑 ID");
     return;
   }
 
-  const loadedTopology = (isPreview.value ? readPreviewTopology(id) : null) ?? await getTopology(id);
-  if (!loadedTopology) {
-    ElMessage.warning("拓扑不存在，请先在编辑器保存");
-    return;
-  }
-  templateTopology.value = cloneTopology(loadedTopology);
-  topology.value = cloneTopology(loadedTopology);
+  initialLoading.value = true;
+  loadStage.value = "加载拓扑数据";
+  loadProgress.value = 10;
+  try {
+    const loadedTopology = (isPreview.value ? readPreviewTopology(id) : null) ?? await getTopology(id);
+    if (!loadedTopology) {
+      ElMessage.warning("拓扑不存在，请先在编辑器保存");
+      return;
+    }
+    templateTopology.value = cloneTopology(loadedTopology);
 
-  await refreshRuntime();
+    loadStage.value = "加载节点类型";
+    loadProgress.value = 35;
+    try {
+      nodeTypes.value = await listEnabledNodeTypes();
+    } catch {
+      nodeTypes.value = [];
+      ElMessage.warning("节点类型加载失败，已使用拓扑数据继续预览");
+    }
+
+    loadStage.value = "构建画布";
+    loadProgress.value = 60;
+    // 先绘制进度帧，再执行同步的 GoJS 画布构建；拓扑在节点类型就绪后赋值，避免重复全量渲染
+    await nextPaintFrame();
+    resetCanvasReady();
+    topology.value = cloneTopology(loadedTopology);
+    // 固定模板引用，画布完成首次建模后运行数据即可持续走增量补丁。
+    lastFullyAppliedBase = templateTopology.value;
+
+    loadStage.value = "加载运行数据";
+    loadProgress.value = 80;
+    await nextPaintFrame();
+    await safeRefreshRuntime(true);
+
+    loadStage.value = "加载节点图片";
+    loadProgress.value = 90;
+    await waitForCanvasReady();
+
+    loadStage.value = "渲染完成";
+    loadProgress.value = 100;
+    await nextPaintFrame();
+  } finally {
+    initialLoading.value = false;
+  }
+
   openWebSocketSources();
   const interval = runtimePollingInterval();
-  if (interval > 0) timer = window.setInterval(refreshRuntime, interval);
+  if (interval > 0) timer = window.setInterval(() => {
+    if (document.hidden) return;
+    void safeRefreshRuntime();
+  }, interval);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 });
 
 onBeforeUnmount(() => {
+  canvasReadyResolver?.();
+  canvasReadyResolver = null;
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   if (timer) window.clearInterval(timer);
   closeWebSocketSources();
 });
 </script>
 
 <template>
-  <main class="app-shell">
+  <main class="app-shell" :style="isDebugRuntime && ruleOverviewOpen ? { gridTemplateRows: '48px minmax(0, 1fr) min(340px, 42vh)' } : undefined">
     <header class="topbar">
-      <span class="topbar-title">拓扑调试运行页</span>
-      <ModuleNav />
+      <el-tooltip v-if="!isPreview" content="返回调试运行列表" placement="bottom" :show-after="300">
+        <el-button text class="topbar-back" :icon="ArrowLeft" @click="router.push('/topology/runtime')" />
+      </el-tooltip>
+      <div class="topbar-heading">
+        <span class="topbar-title">拓扑调试运行页</span>
+        <span v-if="topology" class="topbar-sub">{{ topology.name }}</span>
+      </div>
       <span class="topbar-spacer" />
-      <el-button v-if="!isPreview" @click="router.push('/runtime-list')">返回调试运行列表</el-button>
-      <el-button v-if="isDebugRuntime" :disabled="!topology" @click="openPreviewApiDialog">接口调试</el-button>
-      <el-button :disabled="!topology" @click="router.push(`/topologies/${topology?.id}/editor`)">编辑</el-button>
-      <el-button @click="refreshRuntime">刷新数据</el-button>
+      <el-segmented
+        v-model="canvasPreviewTheme"
+        :disabled="!topology"
+        :options="[
+          { label: '白底', value: 'light' },
+          { label: '深底', value: 'dark' }
+        ]"
+        size="small"
+      />
+      <el-button v-if="isDebugRuntime" text :icon="Tickets" :disabled="!topology" :type="ruleOverviewOpen ? 'primary' : undefined" @click="ruleOverviewOpen = !ruleOverviewOpen">规则总览</el-button>
+      <el-button v-if="isDebugRuntime" text :icon="Connection" :disabled="!topology" @click="openPreviewApiDialog">接口调试</el-button>
+      <el-button text :icon="Edit" :disabled="!topology" @click="router.push(`/topology/list?id=${encodeURIComponent(topology?.id ?? '')}`)">编辑</el-button>
+      <el-button type="primary" :icon="Refresh" @click="safeRefreshRuntime(true)">刷新数据</el-button>
     </header>
     <section
       class="workspace"
@@ -789,13 +941,16 @@ onBeforeUnmount(() => {
       <div />
       <div class="canvas-wrap">
         <TopologyCanvas
+          ref="canvasRef"
           mode="runtime"
           :topology-data="topology"
           :node-types="nodeTypes"
           :selected-key="selectedKey"
           :event-context="eventContext"
+          :editor-background-theme="canvasPreviewTheme"
           @event="handleCanvasEvent"
           @selection-change="selectedKey = $event"
+          @ready="handleCanvasReady"
         />
       </div>
       <aside class="runtime-right-panel">
@@ -876,6 +1031,14 @@ onBeforeUnmount(() => {
         </section>
       </aside>
     </section>
+    <RuleOverviewPanel
+      v-if="isDebugRuntime && ruleOverviewOpen"
+      :node-groups="ruleOverview.nodes"
+      :link-groups="ruleOverview.links"
+      :selected-key="selectedKey"
+      @select="selectedKey = $event"
+      @close="ruleOverviewOpen = false"
+    />
     <el-dialog v-model="previewApiDialogVisible" title="接口调试" width="980px" class="preview-api-dialog">
       <div class="preview-api-header">
         <div>
@@ -899,20 +1062,18 @@ onBeforeUnmount(() => {
           <div class="preview-json-grid">
             <label>
               Mock JSON
-              <textarea
-                :value="previewMockTexts[String(index)] ?? '{}'"
-                rows="10"
-                spellcheck="false"
-                @input="updatePreviewMockDraft(index, ($event.target as HTMLTextAreaElement).value)"
+              <JsonTextEditor
+                :model-value="previewMockData[String(index)]"
+                :height="220"
+                @update:model-value="updatePreviewMockDraft(index, $event)"
               />
             </label>
             <label>
               当前运行态数据
-              <textarea
-                :value="jsonText(lastRuntimeSnapshot[source.sourceId])"
-                rows="10"
+              <JsonTextEditor
+                :model-value="jsonObject(lastRuntimeSnapshot[source.sourceId])"
+                :height="220"
                 readonly
-                spellcheck="false"
               />
             </label>
           </div>
@@ -920,10 +1081,47 @@ onBeforeUnmount(() => {
       </div>
       <div v-else class="preview-empty">暂无接口配置。</div>
     </el-dialog>
+    <div v-if="initialLoading" class="page-loading-overlay">
+      <div class="page-loading-card">
+        <el-progress :percentage="loadProgress" :stroke-width="10" :show-text="false" />
+        <div class="page-loading-text">{{ loadStage }}（{{ loadProgress }}%）</div>
+      </div>
+    </div>
   </main>
 </template>
 
 <style scoped>
+.app-shell {
+  position: relative;
+}
+
+.page-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(255 255 255 / 72%);
+  backdrop-filter: blur(2px);
+}
+
+.page-loading-card {
+  width: min(360px, 72vw);
+  padding: 20px 24px;
+  background: #ffffff;
+  border: 1px solid #d8dde6;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 10%);
+}
+
+.page-loading-text {
+  margin-top: 10px;
+  color: #4b5563;
+  font-size: 13px;
+  text-align: center;
+}
+
 .runtime-right-panel {
   min-width: 0;
   height: 100%;

@@ -9,6 +9,7 @@ import TopologyEditListPage from "./topology/pages/TopologyEditListPage.vue";
 import TopologyRuntimeListPage from "./topology/pages/TopologyRuntimeListPage.vue";
 import TopologyRuntimePage from "./topology/pages/TopologyRuntimePage.vue";
 import NodeTypeManagePage from "./topology/pages/NodeTypeManagePage.vue";
+import FileManagePage from "./topology/pages/FileManagePage.vue";
 import "./styles.css";
 
 const router = createRouter({
@@ -20,6 +21,7 @@ const router = createRouter({
     { path: "/runtime-list", component: TopologyRuntimeListPage },
     { path: "/runtime/:id", component: TopologyRuntimePage },
     { path: "/node-types", component: NodeTypeManagePage },
+    { path: "/files", component: FileManagePage },
     { path: "/editor", redirect: "/topologies/topology_001/editor" },
     { path: "/runtime", redirect: "/runtime-list" }
   ]

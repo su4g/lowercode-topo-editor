@@ -2,14 +2,17 @@ export type NodeCategory = "equipment" | "container" | "annotation" | "control";
 
 export type NodeStatusKey = "default" | "running" | "fault" | "offline";
 
+export type PortSide = "top" | "right" | "bottom" | "left";
+
 export type PortDefinition = {
   id: string;
   label: string;
   direction: "in" | "out" | "both";
+  side?: PortSide;
+  positionPercent?: number;
   maxLinks?: number;
   linkTypes?: string[];
 };
-
 export type FormFieldDefinition = {
   field: string;
   label: string;
@@ -31,6 +34,11 @@ export type GroupStyleDefaults = {
 export type AnnotationDefaults = {
   textColor?: string;
   textSize?: number;
+  fontWeight?: string | number;
+  fontStyle?: "normal" | "italic";
+  textDecoration?: string;
+  textAlign?: "left" | "center" | "right";
+  lineHeight?: number;
 };
 
 export type ButtonRenderMode = "text" | "image" | "imageText";

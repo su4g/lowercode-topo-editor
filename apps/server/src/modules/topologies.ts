@@ -3,6 +3,7 @@ import { topologyDataSchema, type TopologyData } from "@topo-editor/topology-sha
 import { toPrismaJson } from "../common/json";
 import { prisma } from "../prisma/client";
 import { fail, ok } from "../common/http";
+import { validateTopology } from "./topology-validation";
 
 function latestConfig(row: Awaited<ReturnType<typeof prisma.topology.findFirst>> & { versions?: Array<{ configJson: unknown }> } | null): TopologyData | null {
   if (!row?.versions?.[0]) return null;
@@ -37,21 +38,37 @@ export async function registerTopologyRoutes(app: FastifyInstance): Promise<void
   app.post("/api/topologies", async (request, reply) => {
     try {
       const topology = topologyDataSchema.parse(request.body) as TopologyData;
-      const row = await prisma.topology.create({
-        data: {
-          topologyCode: topology.id,
-          topologyName: topology.name,
-          status: "draft",
-          versions: {
-            create: {
-              versionNo: topology.version,
-              versionName: "草稿版本",
-              configJson: toPrismaJson(topology),
-              createdBy: "local"
+      const validation = validateTopology(topology);
+      if (!validation.valid) {
+        return reply.status(400).send({ code: 400, message: validation.errors[0]?.message, data: validation });
+      }
+      const row = await prisma.$transaction(async (tx) => {
+        const created = await tx.topology.create({
+          data: {
+            topologyCode: topology.id,
+            topologyName: topology.name,
+            status: "draft",
+            versions: {
+              create: {
+                versionNo: topology.version,
+                versionName: "草稿版本",
+                configJson: toPrismaJson(topology),
+                createdBy: "local"
+              }
             }
+          },
+          include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } }
+        });
+        await tx.topologyOperationLog.create({
+          data: {
+            topologyId: created.id,
+            operationType: "create",
+            operationDesc: "创建拓扑",
+            afterJson: toPrismaJson(topology),
+            operator: "local"
           }
-        },
-        include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } }
+        });
+        return created;
       });
       return ok(latestConfig(row));
     } catch (error) {
@@ -63,34 +80,57 @@ export async function registerTopologyRoutes(app: FastifyInstance): Promise<void
     try {
       const { id } = request.params as { id: string };
       const topology = topologyDataSchema.parse({ ...(request.body as object), id }) as TopologyData;
-      const row = await prisma.topology.upsert({
-        where: { topologyCode: id },
-        update: {
-          topologyName: topology.name,
-          status: "draft",
-          versions: {
-            create: {
-              versionNo: topology.version,
-              versionName: "草稿版本",
-              configJson: toPrismaJson(topology),
-              createdBy: "local"
+      const validation = validateTopology(topology);
+      if (!validation.valid) {
+        return reply.status(400).send({ code: 400, message: validation.errors[0]?.message, data: validation });
+      }
+      const row = await prisma.$transaction(async (tx) => {
+        const previous = await tx.topology.findUnique({
+          where: { topologyCode: id },
+          include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } }
+        });
+        const saved = await tx.topology.upsert({
+          where: { topologyCode: id },
+          update: {
+            topologyName: topology.name,
+            status: "draft",
+            versions: {
+              create: {
+                versionNo: topology.version,
+                versionName: "草稿版本",
+                configJson: toPrismaJson(topology),
+                createdBy: "local"
+              }
             }
-          }
-        },
-        create: {
-          topologyCode: id,
-          topologyName: topology.name,
-          status: "draft",
-          versions: {
-            create: {
-              versionNo: topology.version,
-              versionName: "草稿版本",
-              configJson: toPrismaJson(topology),
-              createdBy: "local"
+          },
+          create: {
+            topologyCode: id,
+            topologyName: topology.name,
+            status: "draft",
+            versions: {
+              create: {
+                versionNo: topology.version,
+                versionName: "草稿版本",
+                configJson: toPrismaJson(topology),
+                createdBy: "local"
+              }
             }
+          },
+          include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } }
+        });
+        await tx.topologyOperationLog.create({
+          data: {
+            topologyId: saved.id,
+            operationType: "save",
+            operationDesc: "保存拓扑",
+            beforeJson: previous?.versions[0]?.configJson
+              ? toPrismaJson(previous.versions[0].configJson)
+              : undefined,
+            afterJson: toPrismaJson(topology),
+            operator: "local"
           }
-        },
-        include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } }
+        });
+        return saved;
       });
       return ok(latestConfig(row));
     } catch (error) {
@@ -122,14 +162,57 @@ export async function registerTopologyRoutes(app: FastifyInstance): Promise<void
     }
 
     const version = topology.versions[0];
-    await prisma.topologyVersion.update({
-      where: { id: version.id },
-      data: { published: true }
+    const config = version.configJson as TopologyData;
+    const validation = validateTopology(config, true);
+    if (!validation.valid) return ok(validation);
+    await prisma.$transaction(async (tx) => {
+      await tx.topologyVersion.update({
+        where: { id: version.id },
+        data: { published: true }
+      });
+      await tx.topology.update({
+        where: { id: topology.id },
+        data: { status: "published", currentVersionId: version.id }
+      });
+      await tx.topologyOperationLog.create({
+        data: {
+          topologyId: topology.id,
+          operationType: "publish",
+          operationDesc: "发布拓扑",
+          afterJson: toPrismaJson(config),
+          operator: "local"
+        }
+      });
     });
-    await prisma.topology.update({
-      where: { id: topology.id },
-      data: { status: "published", currentVersionId: version.id }
-    });
-    return ok({ valid: true, versionId: version.id });
+    return ok({ ...validation, versionId: version.id });
+  });
+
+  app.delete("/api/topologies/:id", async (request, reply) => {
+    try {
+      const { id } = request.params as { id: string };
+      const topology = await prisma.topology.findUnique({
+        where: { topologyCode: id },
+        include: { versions: { orderBy: { createdAt: "desc" }, take: 1 } }
+      });
+      if (!topology) return reply.status(404).send({ code: 404, message: "拓扑不存在" });
+
+      await prisma.$transaction(async (tx) => {
+        await tx.topologyOperationLog.create({
+          data: {
+            topologyId: topology.id,
+            operationType: "delete",
+            operationDesc: "删除拓扑",
+            beforeJson: topology.versions[0]?.configJson
+              ? toPrismaJson(topology.versions[0].configJson)
+              : undefined,
+            operator: "local"
+          }
+        });
+        await tx.topology.delete({ where: { id: topology.id } });
+      });
+      return ok({ id });
+    } catch (error) {
+      return fail(reply, error);
+    }
   });
 }

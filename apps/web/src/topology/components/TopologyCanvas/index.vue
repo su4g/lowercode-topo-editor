@@ -1,16 +1,29 @@
 <script setup lang="ts">
+// @ts-nocheck
 import "../../../core/go.js";
-import type * as GoJS from "gojs";
-import { defaultNodePorts, normalizeExpressionPath, readExpressionPath, resolveExpressionValue, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeTypeDefinition, type PortDefinition, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { DEFAULT_TOPOLOGY_CANVAS, defaultNodePorts, nodeMatchesRuleIdentity, nodeRuleIdentity, nodeRuleIdentityCandidates, normalizeExpressionPath, normalizePortDefinition, portAlignmentFraction, readExpressionPath, resolveExpressionValue, VISUAL_PORT_ID_PREFIX, type ContainerStyle, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeLabelStyle, type NodeTypeDefinition, type PortDefinition, type PortSide, type TopologyCanvasConfig, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { isImageAsset, isOssAssetRef, resolveAssetUrl } from "../../services/assetApi";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   mode: "edit" | "runtime";
   topologyData: TopologyData | null;
   nodeTypes: NodeTypeDefinition[];
   selectedKey?: string;
   eventContext?: Record<string, unknown>;
-}>();
+  editorBackgroundTheme?: "light" | "dark" | "transparent";
+  showCanvasBoundary?: boolean;
+  enableWheelZoom?: boolean;
+  autoFit?: boolean;
+  fitPadding?: number;
+  fitMaxScale?: number;
+}>(), {
+  showCanvasBoundary: undefined,
+  enableWheelZoom: undefined,
+  autoFit: undefined,
+  fitPadding: undefined,
+  fitMaxScale: undefined
+});
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
 
@@ -19,14 +32,18 @@ const emit = defineEmits<{
   event: [event: TopologyEvent];
   dropNode: [payload: { nodeType: NodeTypeDefinition; loc: string; groupKey?: string }];
   selectionChange: [key: string];
+  ready: [];
 }>();
 
 defineExpose({
   exportTopology,
   updateNodeDataFromProps,
   updateLinkDataFromProps,
+  applyRuntimePatch,
   previewLinkStyle,
   clearLinkStylePreview,
+  previewContainerStyle,
+  clearContainerStylePreview,
   undo,
   redo,
   deleteSelection,
@@ -36,14 +53,29 @@ defineExpose({
 
 const canvasEl = ref<HTMLDivElement | null>(null);
 const overviewEl = ref<HTMLDivElement | null>(null);
+const miniViewEl = ref<HTMLDivElement | null>(null);
+const assetUrlMap = ref<Record<string, string>>({});
+const failedAssetValues = new Set<string>();
 let diagram: GoJS.Diagram | null = null;
 let overview: GoJS.Overview | null = null;
+let canvasBoundaryPart: GoJS.Part | null = null;
 let applyingModel = false;
 let skipNextTopologyApply = false;
+// props 增量回写产生的 commit 不再回发 change：父组件会自行应用同一补丁，避免每次编辑全量导出
+let suppressChangeEmit = false;
+let changeEmitScheduled = false;
+let assetExpiryTimer: number | undefined;
+let topologyApplyToken = 0;
+let lastAppliedTopology: TopologyData | null = null;
 let lastTopologyRenderSignature = "";
+// 签名按需惰性计算：热路径（属性编辑回写）只做引用比较，避免整棵拓扑 JSON.stringify
+let topologySignatureFresh = false;
 let flowTimer: number | undefined;
 let flowOffset = 0;
+let hasAnimatedLinks = false;
+let resizeObserver: ResizeObserver | null = null;
 let linkStylePreview: { linkKey: string; style: LinkStyle } | null = null;
+let containerStylePreview: { nodeKey: string; style: ContainerStyle } | null = null;
 let miniViewDrag:
   | {
     didMove: boolean;
@@ -52,19 +84,48 @@ let miniViewDrag:
     startPosition: GoJS.Point;
   }
   | null = null;
+let miniViewPanelDrag:
+  | {
+    didMove: boolean;
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startLeft: number;
+    startTop: number;
+  }
+  | null = null;
 
 const SNAP_GRID_SIZE = 2;
 const VISIBLE_GRID_SIZE = 10;
+const KEYBOARD_NUDGE_STEP = 1;
+const KEYBOARD_BIG_NUDGE_STEP = 10;
+const EDITOR_BACKGROUND_COLORS = {
+  light: "#ffffff",
+  dark: "#0f172a",
+  transparent: "transparent"
+} as const;
 const OVERVIEW_VIEWPORT_BOX_NAME = "VIEWPORT_BOX";
-const FIXED_PORT_SIDES: PortSide[] = ["top", "right", "bottom", "left"];
+const CANVAS_BOUNDARY_SHAPE_NAME = "CANVAS_BOUNDARY_SHAPE";
+const MINI_VIEW_MARGIN = 14;
+const MINI_VIEW_STORAGE_KEY = "topology:miniview";
 const PORT_VISUAL_OFFSET = 14;
-const PORT_SIZE = 12;
-const VISUAL_PORT_PREFIX = "__visual__";
+const PORT_SIZE = 8;
+const NODE_CLICK_PADDING = 6;
+const ADORNMENT_PORT_HANDLE_SIZE = 12;
+const RESIZE_HANDLE_SIZE = 4;
+// 旋转手柄放在右上角对角方向，避开四边的端口手柄
+const ROTATE_HANDLE_ANGLE = 315;
+const ROTATE_HANDLE_DISTANCE = 10;
+// 16x16 视口内的环形箭头（圆弧 + 实心三角箭头），用作旋转手柄图标
+const ROTATE_ICON_GEOMETRY = "M12.76 5.25 B330 300 8 8 5.5 5.5 X F M7.8 0.6 L11.2 2.5 L7.8 4.4 Z";
+const ASSET_REFRESH_INTERVAL_MS = 91_000;
+const IMAGE_PRELOAD_TIMEOUT_MS = 8_000;
 
-type PortSide = "left" | "right" | "top" | "bottom";
+type MiniViewCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
 type DiagramPortData = PortDefinition & {
   side: PortSide;
+  positionPercent: number;
 };
 
 type DiagramNodeData = TopologyNode & {
@@ -84,6 +145,54 @@ type SerializablePoint = {
   y: number;
 };
 
+type PickCandidate = {
+  key: string;
+  label: string;
+  kind: "node" | "group" | "link";
+  zOrder: number;
+  part: GoJS.Part;
+};
+
+type PickMenuState = {
+  visible: boolean;
+  x: number;
+  y: number;
+  candidates: PickCandidate[];
+};
+
+const pickMenu = shallowRef<PickMenuState | null>(null);
+let lastPickCycle:
+  | {
+    pointKey: string;
+    keys: string[];
+    index: number;
+  }
+  | null = null;
+
+const miniViewCorner = ref<MiniViewCorner>("bottom-right");
+const miniViewCollapsed = ref(false);
+const miniViewPanelPosition = ref<{ left: number; top: number } | null>(null);
+
+const miniViewStyle = computed(() => {
+  const floatingPosition = miniViewPanelPosition.value;
+  if (floatingPosition) {
+    return {
+      left: `${floatingPosition.left}px`,
+      top: `${floatingPosition.top}px`,
+      right: "auto",
+      bottom: "auto"
+    };
+  }
+
+  const corner = miniViewCorner.value;
+  return {
+    top: corner.startsWith("top") ? `${MINI_VIEW_MARGIN}px` : "auto",
+    right: corner.endsWith("right") ? `${MINI_VIEW_MARGIN}px` : "auto",
+    bottom: corner.startsWith("bottom") ? `${MINI_VIEW_MARGIN}px` : "auto",
+    left: corner.endsWith("left") ? `${MINI_VIEW_MARGIN}px` : "auto"
+  };
+});
+
 function getGo() {
   const localGo = window.go as typeof GoJS | undefined;
   if (!localGo) {
@@ -98,6 +207,15 @@ function cloneModelArray<T>(value: T[]): T[] {
 
 function cloneModelValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function normalizeCanvasConfig(canvas?: Partial<TopologyCanvasConfig> | null): TopologyCanvasConfig {
+  const width = Number(canvas?.width);
+  const height = Number(canvas?.height);
+  return {
+    width: Number.isFinite(width) && width > 0 ? Math.round(width) : DEFAULT_TOPOLOGY_CANVAS.width,
+    height: Number.isFinite(height) && height > 0 ? Math.round(height) : DEFAULT_TOPOLOGY_CANVAS.height
+  };
 }
 
 type LinkCreationDefaults = {
@@ -217,14 +335,14 @@ function canContainNode(groupType: NodeTypeDefinition | undefined, nodeType: Nod
 }
 
 function isImageIcon(icon?: string) {
-  return !!icon && (
-    /^https?:\/\//.test(icon)
-    || icon.startsWith("data:image/")
-    || /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(icon)
-  );
+  return isImageAsset(icon);
 }
 
 function normalizeIcon(icon: string) {
+  const resolved = assetUrlMap.value[icon];
+  if (resolved) return resolved;
+  if (failedAssetValues.has(icon)) return "";
+  if (isOssAssetRef(icon)) return "";
   if (icon.startsWith("/uploads/")) return `${API_BASE_URL}${icon}`;
   return icon;
 }
@@ -244,13 +362,178 @@ function resolveNodeIcon(node: TopologyNode) {
   const directIcon = typeof (node as TopologyNode & { icon?: unknown }).icon === "string"
     ? (node as TopologyNode & { icon?: string }).icon
     : undefined;
-  const icon = statusIcon || propsIcon || directIcon || nodeType?.buttonDefaults?.icon || nodeType?.icon || "";
-  return normalizeIcon(icon);
+  // 状态图尚未取得 OSS 签名地址时继续尝试默认图，避免节点短暂变成空白。
+  const candidates = [statusIcon, propsIcon, directIcon, nodeType?.buttonDefaults?.icon, nodeType?.icon];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const icon = normalizeIcon(candidate);
+    if (icon) return icon;
+  }
+  return "";
+}
+
+async function resolveAssetEntry(value: string, force = false) {
+  if (!force && assetUrlMap.value[value]) return assetUrlMap.value[value];
+  try {
+    const url = await resolveAssetUrl(value);
+    return url || "";
+  } catch {
+    return "";
+  }
+}
+
+function topologyAssetValues(data: TopologyData, nodeTypes: NodeTypeDefinition[]) {
+  const values = new Set<string>();
+  const usedTypeIds = new Set(data.nodes.map((node) => node.typeId));
+  const add = (value?: string) => {
+    if (value && isImageAsset(value)) values.add(value);
+  };
+
+  for (const nodeType of nodeTypes) {
+    if (!usedTypeIds.has(nodeType.id)) continue;
+    add(nodeType.icon);
+    Object.values(nodeType.statusImages ?? {}).forEach(add);
+    add(nodeType.buttonDefaults?.icon);
+  }
+  for (const node of data.nodes) {
+    add(typeof node.props?.icon === "string" ? node.props.icon : undefined);
+    add(typeof (node as TopologyNode & { icon?: unknown }).icon === "string"
+      ? (node as TopologyNode & { icon?: string }).icon
+      : undefined);
+  }
+  return [...values];
+}
+
+function preloadImage(url: string) {
+  return new Promise<boolean>((resolve) => {
+    const image = new Image();
+    let settled = false;
+    const finish = (loaded: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      image.onload = null;
+      image.onerror = null;
+      resolve(loaded);
+    };
+    const timer = window.setTimeout(() => finish(false), IMAGE_PRELOAD_TIMEOUT_MS);
+    image.onload = () => finish(true);
+    image.onerror = () => finish(false);
+    image.src = url;
+    if (image.complete) finish(image.naturalWidth > 0);
+  });
+}
+
+async function prepareTopologyAssets(data: TopologyData, nodeTypes: NodeTypeDefinition[], force = false) {
+  const values = topologyAssetValues(data, nodeTypes);
+  const resolvedEntries = await Promise.all(values.map(async (value) => [value, await resolveAssetEntry(value, force)] as const));
+  const preloadByUrl = new Map<string, Promise<boolean>>();
+  for (const [, url] of resolvedEntries) {
+    if (url && !preloadByUrl.has(url)) preloadByUrl.set(url, preloadImage(url));
+  }
+  const loadedByUrl = new Map<string, boolean>();
+  await Promise.all([...preloadByUrl].map(async ([url, promise]) => loadedByUrl.set(url, await promise)));
+
+  const nextMap = { ...assetUrlMap.value };
+  for (const [value, url] of resolvedEntries) {
+    if (url && loadedByUrl.get(url) === true) {
+      nextMap[value] = url;
+      failedAssetValues.delete(value);
+    } else if (!nextMap[value]) {
+      failedAssetValues.add(value);
+    }
+  }
+  assetUrlMap.value = nextMap;
+  scheduleAssetExpiryRefresh();
+}
+
+function scheduleAssetExpiryRefresh() {
+  if (!diagram) return;
+  if (assetExpiryTimer) window.clearTimeout(assetExpiryTimer);
+  assetExpiryTimer = window.setTimeout(() => {
+    assetExpiryTimer = undefined;
+    if (!diagram || !props.topologyData) return;
+    void prepareTopologyAssets(props.topologyData, props.nodeTypes, true).then(() => {
+      refreshAllDerivedNodeData();
+      diagram?.requestUpdate();
+    });
+  }, ASSET_REFRESH_INTERVAL_MS);
+}
+
+function refreshAllDerivedNodeData() {
+  if (!diagram) return;
+  const model = diagram.model as GoJS.GraphLinksModel;
+  model.commit((m) => {
+    (model.nodeDataArray as DiagramNodeData[]).forEach((nodeData) => {
+      refreshDerivedNodeData(m as GoJS.GraphLinksModel, nodeData);
+      m.updateTargetBindings(nodeData);
+    });
+  }, null);
+}
+
+function refreshInteractionBindings() {
+  if (!diagram) return;
+  const model = diagram.model as GoJS.GraphLinksModel;
+  model.commit((m) => {
+    (model.nodeDataArray as DiagramNodeData[]).forEach((nodeData) => m.updateTargetBindings(nodeData));
+    (model.linkDataArray as DiagramLinkData[]).forEach((linkData) => m.updateTargetBindings(linkData));
+  }, null);
 }
 
 function resolveIconText(node: TopologyNode, icon: string) {
   if (icon && !isImageIcon(icon)) return icon;
   return node.label?.slice(0, 1) || node.typeId.slice(0, 1).toUpperCase();
+}
+
+const DEFAULT_NODE_LABEL_STYLE = {
+  color: "#111827",
+  fontSize: 13,
+  fontWeight: "600",
+  fontStyle: "normal" as const,
+  textDecoration: "none",
+  textAlign: "center" as const
+};
+
+function resolveNodeLabelStyle(node: DiagramNodeData): NodeLabelStyle {
+  return node.labelStyle ?? {};
+}
+
+function resolveNodeLabelColor(node: DiagramNodeData) {
+  const color = resolveNodeLabelStyle(node).color;
+  return typeof color === "string" && color.trim() ? color : DEFAULT_NODE_LABEL_STYLE.color;
+}
+
+function resolveNodeLabelFontSize(node: DiagramNodeData) {
+  const fontSize = Number(resolveNodeLabelStyle(node).fontSize);
+  return Number.isFinite(fontSize) && fontSize > 0 ? Math.round(fontSize) : DEFAULT_NODE_LABEL_STYLE.fontSize;
+}
+
+function resolveNodeLabelFontWeight(node: DiagramNodeData) {
+  const fontWeight = resolveNodeLabelStyle(node).fontWeight;
+  if ((typeof fontWeight === "string" && fontWeight.trim()) || typeof fontWeight === "number") return fontWeight;
+  return DEFAULT_NODE_LABEL_STYLE.fontWeight;
+}
+
+function resolveNodeLabelFontStyle(node: DiagramNodeData) {
+  return resolveNodeLabelStyle(node).fontStyle === "italic" ? "italic" : DEFAULT_NODE_LABEL_STYLE.fontStyle;
+}
+
+function resolveNodeLabelFont(node: DiagramNodeData) {
+  return `${resolveNodeLabelFontStyle(node)} normal ${resolveNodeLabelFontWeight(node)} ${resolveNodeLabelFontSize(node)}px sans-serif`;
+}
+
+function resolveNodeLabelTextDecoration(node: DiagramNodeData) {
+  const textDecoration = resolveNodeLabelStyle(node).textDecoration;
+  return typeof textDecoration === "string" && textDecoration.trim() ? textDecoration : DEFAULT_NODE_LABEL_STYLE.textDecoration;
+}
+
+function nodeLabelHasTextDecoration(node: DiagramNodeData, decoration: "underline" | "line-through") {
+  return resolveNodeLabelTextDecoration(node).split(/\s+/).includes(decoration);
+}
+
+function resolveNodeLabelTextAlign(node: DiagramNodeData) {
+  const textAlign = resolveNodeLabelStyle(node).textAlign;
+  return textAlign === "left" || textAlign === "right" ? textAlign : DEFAULT_NODE_LABEL_STYLE.textAlign;
 }
 
 function isAnnotationNode(node: TopologyNode) {
@@ -280,11 +563,57 @@ function resolveAnnotationTextColor(node: DiagramNodeData) {
   return nodeTypeOf(node.typeId)?.annotationDefaults?.textColor ?? "#111827";
 }
 
-function resolveAnnotationTextFont(node: DiagramNodeData) {
+function resolveAnnotationTextSize(node: DiagramNodeData) {
   const size = Number(node.props?.textSize);
   const defaultSize = nodeTypeOf(node.typeId)?.annotationDefaults?.textSize ?? 14;
-  const fontSize = Number.isFinite(size) && size > 0 ? Math.round(size) : Math.round(defaultSize);
-  return `${fontSize}px sans-serif`;
+  return Number.isFinite(size) && size > 0 ? Math.round(size) : Math.round(defaultSize);
+}
+
+function resolveAnnotationFontWeight(node: DiagramNodeData) {
+  const value = node.props?.fontWeight;
+  if ((typeof value === "string" && value.trim()) || typeof value === "number") return value;
+  return nodeTypeOf(node.typeId)?.annotationDefaults?.fontWeight ?? "400";
+}
+
+function resolveAnnotationFontStyle(node: DiagramNodeData) {
+  const value = node.props?.fontStyle;
+  if (value === "italic") return value;
+  return nodeTypeOf(node.typeId)?.annotationDefaults?.fontStyle === "italic" ? "italic" : "normal";
+}
+
+function resolveAnnotationTextFont(node: DiagramNodeData) {
+  return `${resolveAnnotationFontStyle(node)} normal ${resolveAnnotationFontWeight(node)} ${resolveAnnotationTextSize(node)}px sans-serif`;
+}
+
+function resolveAnnotationTextAlign(node: DiagramNodeData) {
+  const value = node.props?.textAlign;
+  if (value === "left" || value === "center" || value === "right") return value;
+  const defaultValue = nodeTypeOf(node.typeId)?.annotationDefaults?.textAlign;
+  return defaultValue === "center" || defaultValue === "right" ? defaultValue : "left";
+}
+
+function resolveAnnotationTextDecoration(node: DiagramNodeData) {
+  const value = node.props?.textDecoration;
+  if (typeof value === "string" && value.trim()) return value;
+  return nodeTypeOf(node.typeId)?.annotationDefaults?.textDecoration ?? "none";
+}
+
+function annotationHasTextDecoration(node: DiagramNodeData, decoration: "underline" | "line-through") {
+  return resolveAnnotationTextDecoration(node).split(/\s+/).includes(decoration);
+}
+
+function resolveAnnotationLineHeight(node: DiagramNodeData) {
+  const value = Number(node.props?.lineHeight);
+  const defaultValue = Number(nodeTypeOf(node.typeId)?.annotationDefaults?.lineHeight);
+  const fontSize = resolveAnnotationTextSize(node);
+  const fallback = Math.round(fontSize * 1.4);
+  if (Number.isFinite(value) && value > 0) return value;
+  if (Number.isFinite(defaultValue) && defaultValue > 0) return defaultValue;
+  return fallback;
+}
+
+function resolveAnnotationLineSpacing(node: DiagramNodeData) {
+  return Math.max(0, (resolveAnnotationLineHeight(node) - resolveAnnotationTextSize(node)) / 2);
 }
 
 function controlRenderMode(node: DiagramNodeData) {
@@ -366,7 +695,7 @@ function shouldShowNodeLabel(node: DiagramNodeData) {
 }
 
 function shouldShowGroupLabel(node: DiagramNodeData) {
-  return node.props?.showLabel !== false;
+  return node.props?.showLabel === true;
 }
 
 function colorWithOpacity(color: string, opacity: number) {
@@ -383,42 +712,28 @@ function colorWithOpacity(color: string, opacity: number) {
 
 function resolveGroupFill(node: DiagramNodeData) {
   const defaults = nodeTypeOf(node.typeId)?.groupStyleDefaults;
-  const transparentBackground = node.props?.transparentBackground ?? defaults?.transparentBackground;
+  const preview = resolvePreviewContainerStyle(node);
+  const transparentBackground = preview?.transparentBackground ?? node.runtime?.transparentBackground ?? node.props?.transparentBackground ?? defaults?.transparentBackground;
   if (transparentBackground === true) return "transparent";
-  const color = node.runtime?.backgroundColor || defaults?.backgroundColor || "#eef6ff";
-  const opacity = Number(node.props?.backgroundOpacity ?? defaults?.backgroundOpacity);
+  const color = preview?.backgroundColor || node.runtime?.backgroundColor || defaults?.backgroundColor || "#eef6ff";
+  const opacity = Number(preview?.backgroundOpacity ?? node.runtime?.backgroundOpacity ?? node.props?.backgroundOpacity ?? defaults?.backgroundOpacity);
   if (!Number.isFinite(opacity)) return color;
   return colorWithOpacity(color, opacity / 100);
 }
 
 function resolveGroupStroke(node: DiagramNodeData) {
-  return node.runtime?.borderColor || nodeTypeOf(node.typeId)?.groupStyleDefaults?.borderColor || "#3b82f6";
+  return resolvePreviewContainerStyle(node)?.borderColor || node.runtime?.borderColor || nodeTypeOf(node.typeId)?.groupStyleDefaults?.borderColor || "#3b82f6";
 }
 
 function resolveGroupStrokeDash(node: DiagramNodeData) {
-  const dashedBorder = node.props?.dashedBorder ?? nodeTypeOf(node.typeId)?.groupStyleDefaults?.dashedBorder;
+  const dashedBorder = resolvePreviewContainerStyle(node)?.dashedBorder ?? node.runtime?.dashedBorder ?? node.props?.dashedBorder ?? nodeTypeOf(node.typeId)?.groupStyleDefaults?.dashedBorder;
   return dashedBorder === true ? [8, 6] : null;
-}
-
-function getPortSide(port: PortDefinition): PortSide {
-  if (port.id === "top") return "top";
-  if (port.id === "right") return "right";
-  if (port.id === "bottom") return "bottom";
-  if (port.id === "left") return "left";
-  if (port.direction === "in") return "left";
-  if (port.direction === "out") return "right";
-  return "bottom";
 }
 
 function buildPortData(typeId: string): DiagramPortData[] {
   const nodeType = nodeTypeOf(typeId);
   const ports = resolveNodeTypePorts(nodeType);
-  return ports.map((port) => {
-    return {
-      ...port,
-      side: getPortSide(port)
-    };
-  });
+  return ports.map(normalizePortDefinition);
 }
 
 function resolveNodeTypePorts(nodeType?: NodeTypeDefinition): PortDefinition[] {
@@ -513,13 +828,16 @@ function normalizeLabelPosition(position?: string): NodeLabelPosition {
   return "bottom";
 }
 
-function toGoLabelAlignment(position?: string) {
+function toGoLabelAlignment(node?: DiagramNodeData) {
   const go = getGo();
-  const labelPosition = normalizeLabelPosition(position);
-  if (labelPosition === "top") return new go.Spot(0.5, 0, 0, -8);
-  if (labelPosition === "right") return new go.Spot(1, 0.5, 8, 0);
-  if (labelPosition === "left") return new go.Spot(0, 0.5, -8, 0);
-  return new go.Spot(0.5, 1, 0, 8);
+  const labelPosition = normalizeLabelPosition(node?.labelPosition);
+  const offset = node?.labelOffset;
+  const dx = Number(offset?.x) || 0;
+  const dy = Number(offset?.y) || 0;
+  if (labelPosition === "top") return new go.Spot(0.5, 0, dx, -8 + dy);
+  if (labelPosition === "right") return new go.Spot(1, 0.5, 8 + dx, dy);
+  if (labelPosition === "left") return new go.Spot(0, 0.5, -8 + dx, dy);
+  return new go.Spot(0.5, 1, dx, 8 + dy);
 }
 
 function toGoLabelAlignmentFocus(position?: string) {
@@ -531,32 +849,54 @@ function toGoLabelAlignmentFocus(position?: string) {
   return go.Spot.Top;
 }
 
-function toGoRealPortAlignment(side: PortSide) {
+function toGoPortAlignment(port: DiagramPortData, offset: number) {
   const go = getGo();
-  const inset = PORT_SIZE / 2;
-  if (side === "left") return new go.Spot(0, 0.5, inset, 0);
-  if (side === "right") return new go.Spot(1, 0.5, -inset, 0);
-  if (side === "top") return new go.Spot(0.5, 0, 0, inset);
-  return new go.Spot(0.5, 1, 0, -inset);
+  const { x, y } = portAlignmentFraction(port);
+  if (port.side === "left") return new go.Spot(x, y, offset, 0);
+  if (port.side === "right") return new go.Spot(x, y, -offset, 0);
+  if (port.side === "top") return new go.Spot(x, y, 0, offset);
+  return new go.Spot(x, y, 0, -offset);
 }
 
-function portForSide(ports: DiagramPortData[] | undefined, side: PortSide) {
-  return ports?.find((port) => port.id === side) ?? ports?.find((port) => port.side === side);
+function toGoVisualPortAlignment(port: DiagramPortData) {
+  return toGoPortAlignment(port, -PORT_VISUAL_OFFSET);
 }
 
-function visualPortId(side: PortSide) {
-  return `${VISUAL_PORT_PREFIX}${side}`;
+/**
+ * 选中态的 Adornment 锚定在 selectionObject 上：普通节点为带 6px 内边距的
+ * CLICK_AREA，而物理/可视端口锚定在 BODY。将 BODY 坐标换算到 Adornment
+ * 坐标系后，手柄中心才能与可视代理端口（BODY 外 14px）精确重合。
+ */
+function toGoAdornmentPortAlignment(port: DiagramPortData, target: GoJS.GraphObject) {
+  const go = getGo();
+  const adornment = target.part;
+  const adornedPart = adornment instanceof go.Adornment ? adornment.adornedPart : null;
+  const clickPadding = adornedPart instanceof go.Group ? 0 : NODE_CLICK_PADDING;
+  const { width, height } = parseNodeSize(adornedPart?.data?.size);
+  const fraction = port.positionPercent / 100;
+  const x = (clickPadding + fraction * width) / (width + clickPadding * 2);
+  const y = (clickPadding + fraction * height) / (height + clickPadding * 2);
+  // CLICK_AREA 已比 BODY 向外扩展了 clickPadding，因此只需再向外偏移剩余距离。
+  const offset = PORT_VISUAL_OFFSET - clickPadding;
+
+  if (port.side === "left") return new go.Spot(0, y, -offset, 0);
+  if (port.side === "right") return new go.Spot(1, y, offset, 0);
+  if (port.side === "top") return new go.Spot(x, 0, 0, -offset);
+  return new go.Spot(x, 1, 0, offset);
+}
+
+function visualPortId(portId: string) {
+  return `${VISUAL_PORT_ID_PREFIX}${portId}`;
 }
 
 function normalizePortId(portId?: string | null) {
   if (!portId) return undefined;
-  return portId?.startsWith(VISUAL_PORT_PREFIX)
-    ? portId.slice(VISUAL_PORT_PREFIX.length)
+  return portId?.startsWith(VISUAL_PORT_ID_PREFIX)
+    ? portId.slice(VISUAL_PORT_ID_PREFIX.length)
     : portId;
 }
 
-function portLabelForSide(ports: DiagramPortData[] | undefined, side: PortSide) {
-  const port = portForSide(ports, side);
+function portTooltipText(port?: DiagramPortData) {
   return port ? `${port.label}（${port.direction}）` : "";
 }
 
@@ -574,7 +914,13 @@ function getIconDesiredSize(size?: string) {
   return new go.Size(Math.max(1, width), Math.max(1, height));
 }
 
-function resolveNodeStatusColor(runtime?: TopologyNode["runtime"]) {
+function shouldUseNodeStatusColor(node: DiagramNodeData) {
+  return nodeTypeOf(node.typeId)?.category !== "equipment";
+}
+
+function resolveNodeStatusColor(node: DiagramNodeData) {
+  if (!shouldUseNodeStatusColor(node)) return "transparent";
+  const runtime = node.runtime;
   if (runtime?.color) return runtime.color;
   if (runtime?.status === "running") return "#22c55e";
   if (runtime?.status === "normal") return "#22c55e";
@@ -585,8 +931,8 @@ function resolveNodeStatusColor(runtime?: TopologyNode["runtime"]) {
   return "transparent";
 }
 
-function hasNodeRuntimeStatus(runtime?: TopologyNode["runtime"]) {
-  return !!runtime?.status || !!runtime?.color;
+function hasNodeRuntimeStatus(node: DiagramNodeData) {
+  return shouldUseNodeStatusColor(node) && (!!node.runtime?.status || !!node.runtime?.color);
 }
 
 function getLabelWidth(size?: string) {
@@ -723,34 +1069,39 @@ function isConnectionToolActive(targetDiagram: GoJS.Diagram) {
     || targetDiagram.currentTool === targetDiagram.toolManager.relinkingTool;
 }
 
-function shouldEnableNodePort(node: GoJS.Node, side: PortSide) {
+function shouldEnableNodePort(node: GoJS.Node, port: DiagramPortData) {
   if (!diagram || props.mode !== "edit") return false;
   const nodeData = node.data as DiagramNodeData | null | undefined;
-  if (!nodeData || !portForSide(nodeData.__ports, side)) return false;
+  if (!nodeData?.__ports?.some((candidate) => candidate.id === port.id)) return false;
   return node.isSelected || isConnectionToolActive(diagram);
 }
 
-function portVisualName(side: PortSide) {
-  return `PORT_VISUAL_${side}`;
+function shouldShowNodePortVisual(node: GoJS.Node, port: DiagramPortData) {
+  if (!diagram || props.mode !== "edit") return false;
+  const nodeData = node.data as DiagramNodeData | null | undefined;
+  if (!nodeData?.__ports?.some((candidate) => candidate.id === port.id)) return false;
+  return isConnectionToolActive(diagram);
 }
 
 function refreshPortVisibility() {
   if (!diagram) return;
   diagram.nodes.each((node) => {
-    FIXED_PORT_SIDES.forEach((side) => {
-      const port = node.findPort(side);
-      const visualPort = node.findObject(portVisualName(side));
+    const ports = (node.data as DiagramNodeData | null | undefined)?.__ports ?? [];
+    ports.forEach((portData) => {
+      const port = node.findPort(portData.id);
+      const visualPort = node.findPort(visualPortId(portData.id));
       if (!port || !visualPort) return;
 
-      const enabled = shouldEnableNodePort(node, side);
+      const enabled = shouldEnableNodePort(node, portData);
+      const visible = shouldShowNodePortVisual(node, portData);
       port.opacity = 1;
       port.pickable = false;
       port.fromLinkable = false;
       port.toLinkable = false;
-      visualPort.opacity = enabled ? 1 : 0;
-      visualPort.pickable = enabled;
-      visualPort.fromLinkable = enabled;
-      visualPort.toLinkable = enabled;
+      visualPort.opacity = visible ? 1 : 0;
+      visualPort.pickable = visible;
+      visualPort.fromLinkable = enabled && canLinkFrom(portData.direction);
+      visualPort.toLinkable = enabled && canLinkTo(portData.direction);
     });
   });
 }
@@ -798,10 +1149,16 @@ function getTopologyRenderSignature(data: TopologyData | null) {
   if (!data) return "";
   return JSON.stringify({
     id: data.id,
+    canvas: data.canvas,
     nodes: data.nodes,
     links: data.links,
     viewport: data.viewport
   });
+}
+
+function acknowledgeAppliedTopology() {
+  lastAppliedTopology = props.topologyData;
+  topologySignatureFresh = false;
 }
 
 function updateNodeDataFromProps(nodeKey: string, patch: Partial<TopologyNode>) {
@@ -810,17 +1167,24 @@ function updateNodeDataFromProps(nodeKey: string, patch: Partial<TopologyNode>) 
   const nodeData = model.findNodeDataForKey(nodeKey) as DiagramNodeData | null;
   if (!nodeData) return;
 
-  model.commit((m) => {
-    Object.entries(patch).forEach(([key, value]) => {
-      if (key === "runtime") {
-        m.setDataProperty(nodeData, "runtime", value as TopologyNode["runtime"]);
-        return;
-      }
-      m.setDataProperty(nodeData, key, value);
-    });
-    refreshDerivedNodeData(m as GoJS.GraphLinksModel, nodeData);
-    m.updateTargetBindings(nodeData);
-  }, "update node from props");
+  suppressChangeEmit = true;
+  try {
+    model.commit((m) => {
+      Object.entries(patch).forEach(([key, value]) => {
+        if (key === "runtime") {
+          m.setDataProperty(nodeData, "runtime", value as TopologyNode["runtime"]);
+          return;
+        }
+        m.setDataProperty(nodeData, key, value);
+      });
+      refreshDerivedNodeData(m as GoJS.GraphLinksModel, nodeData);
+      m.updateTargetBindings(nodeData);
+    }, "update node from props");
+  } finally {
+    suppressChangeEmit = false;
+  }
+  // 模型已按补丁更新，吸收父组件随后的同内容 prop 回写
+  skipNextTopologyApply = true;
 }
 
 function updateLinkDataFromProps(linkKey: string, patch: Partial<TopologyLink>) {
@@ -831,6 +1195,22 @@ function updateLinkDataFromProps(linkKey: string, patch: Partial<TopologyLink>) 
 
   if (props.mode === "edit") rememberLinkCreationDefaults(patch);
 
+  suppressChangeEmit = true;
+  try {
+    commitLinkPatch(model, linkData, patch);
+  } finally {
+    suppressChangeEmit = false;
+  }
+  // 模型已按补丁更新，吸收父组件随后的同内容 prop 回写
+  skipNextTopologyApply = true;
+
+  refreshAnimatedLinkFlag();
+  const link = diagram.findLinkForData(linkData);
+  link?.invalidateRoute();
+  link?.updateRoute();
+}
+
+function commitLinkPatch(model: GoJS.GraphLinksModel, linkData: DiagramLinkData, patch: Partial<TopologyLink>) {
   model.commit((m) => {
     Object.entries(patch).forEach(([key, value]) => {
       if (key === "runtime") {
@@ -856,10 +1236,34 @@ function updateLinkDataFromProps(linkKey: string, patch: Partial<TopologyLink>) 
     });
     m.updateTargetBindings(linkData);
   }, "update link from props");
+}
 
-  const link = diagram.findLinkForData(linkData);
-  link?.invalidateRoute();
-  link?.updateRoute();
+type RuntimePatch = {
+  nodes: Array<{ key: string; runtime: TopologyNode["runtime"] }>;
+  links: Array<{ key: string; runtime: TopologyLink["runtime"] }>;
+};
+
+function applyRuntimePatch(patch: RuntimePatch) {
+  if (!diagram) return false;
+  const model = diagram.model as GoJS.GraphLinksModel;
+  // null 事务名 => skipsUndoManager，避免运行态轮询不断累积撤销历史
+  model.commit((m) => {
+    patch.nodes.forEach(({ key, runtime }) => {
+      const nodeData = model.findNodeDataForKey(key) as DiagramNodeData | null;
+      if (!nodeData) return;
+      m.setDataProperty(nodeData, "runtime", runtime);
+      refreshDerivedNodeData(m as GoJS.GraphLinksModel, nodeData);
+      m.updateTargetBindings(nodeData);
+    });
+    patch.links.forEach(({ key, runtime }) => {
+      const linkData = model.findLinkDataForKey(key) as DiagramLinkData | null;
+      if (!linkData) return;
+      m.setDataProperty(linkData, "runtime", runtime);
+      m.updateTargetBindings(linkData);
+    });
+  }, null);
+  refreshAnimatedLinkFlag();
+  return true;
 }
 
 function refreshLinkStyleBinding(linkKey: string | undefined) {
@@ -874,11 +1278,35 @@ function refreshLinkStyleBinding(linkKey: string | undefined) {
   diagram.requestUpdate();
 }
 
+function refreshNodeStyleBinding(nodeKey: string | undefined) {
+  if (!diagram || !nodeKey) return;
+  const model = diagram.model as GoJS.GraphLinksModel;
+  const nodeData = model.findNodeDataForKey(nodeKey) as DiagramNodeData | null;
+  if (!nodeData) return;
+  model.updateTargetBindings(nodeData);
+  diagram.requestUpdate();
+}
+
 function previewLinkStyle(linkKey: string, style: LinkStyle) {
   const previousKey = linkStylePreview?.linkKey;
   linkStylePreview = { linkKey, style: cloneModelArray([style])[0] };
   refreshLinkStyleBinding(previousKey);
   refreshLinkStyleBinding(linkKey);
+  refreshAnimatedLinkFlag();
+}
+
+function previewContainerStyle(nodeKey: string, style: ContainerStyle) {
+  const previousKey = containerStylePreview?.nodeKey;
+  containerStylePreview = { nodeKey, style: cloneModelArray([style])[0] };
+  refreshNodeStyleBinding(previousKey);
+  refreshNodeStyleBinding(nodeKey);
+}
+
+function clearContainerStylePreview(nodeKey?: string) {
+  if (!containerStylePreview || (nodeKey && containerStylePreview.nodeKey !== nodeKey)) return;
+  const previousKey = containerStylePreview.nodeKey;
+  containerStylePreview = null;
+  refreshNodeStyleBinding(previousKey);
 }
 
 function clearLinkStylePreview(linkKey?: string) {
@@ -886,6 +1314,11 @@ function clearLinkStylePreview(linkKey?: string) {
   const previousKey = linkStylePreview.linkKey;
   linkStylePreview = null;
   refreshLinkStyleBinding(previousKey);
+  refreshAnimatedLinkFlag();
+}
+
+function resolvePreviewContainerStyle(node: DiagramNodeData) {
+  return containerStylePreview?.nodeKey === node.key ? containerStylePreview.style : undefined;
 }
 
 function resolvePreviewStyle(link: DiagramLinkData) {
@@ -1034,30 +1467,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeDataKey(value: string | undefined) {
-  return (value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function configuredNodeIdentifier(node: TopologyNode) {
-  const identifier = node.props?.identifier;
-  return typeof identifier === "string" ? identifier.trim() : "";
-}
-
 function nodeDataKeys(node: TopologyNode) {
-  return [configuredNodeIdentifier(node), node.key, node.label, node.typeId]
-    .filter(Boolean)
-    .flatMap((value) => {
-      const text = String(value);
-      return [text, text.toLowerCase(), normalizeDataKey(text)];
-    })
-    .filter(Boolean);
+  return nodeRuleIdentityCandidates(node);
 }
 
 function preferredNodeDataKey(node: TopologyNode) {
-  return normalizeDataKey(configuredNodeIdentifier(node))
-    || normalizeDataKey(node.label)
-    || normalizeDataKey(node.key)
-    || normalizeDataKey(node.typeId);
+  return nodeRuleIdentity(node);
 }
 
 function readDefinedPath(source: Record<string, unknown>, path: string) {
@@ -1079,7 +1494,7 @@ function isAbsoluteEventPath(path: string) {
   const firstSegment = eventPathFirstSegment(path);
   if (!firstSegment || firstSegment === path) return false;
   if (["metaData", "mateData", "runtimeData", "node", "nodeData", "bindNode", "boundNode", "boundProps", "boundData", "topology"].includes(firstSegment)) return true;
-  if (props.topologyData?.nodes.some((node) => node.key === firstSegment)) return true;
+  if (props.topologyData?.nodes.some((node) => nodeMatchesRuleIdentity(node, firstSegment))) return true;
   if (props.topologyData?.dataSources?.some((source) => source.sourceId === firstSegment)) return true;
   return false;
 }
@@ -1173,6 +1588,21 @@ function eventConfigsForTrigger(node: DiagramNodeData, trigger: NodeEventConfig[
   });
 }
 
+function hasConfiguredNodeEvents(node: DiagramNodeData) {
+  return eventConfigsForTrigger(node, "click").length > 0
+    || eventConfigsForTrigger(node, "doubleClick").length > 0
+    || eventConfigsForTrigger(node, "contextMenu").length > 0;
+}
+
+function hasConfiguredNodeEventForTrigger(node: DiagramNodeData, trigger: NodeEventConfig["trigger"]) {
+  return eventConfigsForTrigger(node, trigger).length > 0;
+}
+
+function resolveNodeCursor(node: DiagramNodeData) {
+  if (props.mode !== "runtime") return "";
+  return hasConfiguredNodeEvents(node) ? "pointer" : "";
+}
+
 function buildEventContext(node: DiagramNodeData, config: NodeEventConfig) {
   const bindNode = config.bindNodeKey
     ? props.topologyData?.nodes.find((item) => item.key === config.bindNodeKey)
@@ -1243,8 +1673,311 @@ function deleteSelection() {
   diagram?.commandHandler.deleteSelection();
 }
 
+function getCanvasBounds() {
+  const go = getGo();
+  const canvas = normalizeCanvasConfig(props.topologyData?.canvas);
+  if (canvas.width <= 0 || canvas.height <= 0) return null;
+  return new go.Rect(0, 0, canvas.width, canvas.height);
+}
+
+function fitDiagramToBounds(bounds: GoJS.Rect, padding = props.fitPadding ?? 80) {
+  if (!diagram) return false;
+  const go = getGo();
+  const viewportWidth = diagram.div?.clientWidth ?? 0;
+  const viewportHeight = diagram.div?.clientHeight ?? 0;
+  if (
+    !Number.isFinite(bounds.x)
+    || !Number.isFinite(bounds.y)
+    || bounds.width <= 0
+    || bounds.height <= 0
+    || viewportWidth <= 0
+    || viewportHeight <= 0
+  ) return false;
+
+  const maxScale = props.fitMaxScale ?? 1;
+  const scale = Math.min(
+    maxScale,
+    Math.max(0.2, Math.min(
+      Math.max(1, viewportWidth - padding) / bounds.width,
+      Math.max(1, viewportHeight - padding) / bounds.height
+    ))
+  );
+  diagram.scale = scale;
+  diagram.position = new go.Point(
+    bounds.x - padding / 2 / scale,
+    bounds.y - padding / 2 / scale
+  );
+  overview?.requestUpdate();
+  overview?.redraw();
+  updateOverviewViewportBoxVisibility();
+  return true;
+}
+
 function fitView() {
-  diagram?.commandHandler.zoomToFit();
+  if (!diagram) return;
+  const bounds = getCanvasBounds();
+  if (bounds && fitDiagramToBounds(bounds)) return;
+  diagram.commandHandler.zoomToFit();
+}
+
+function resolveCanvasBoundaryFill() {
+  if (props.editorBackgroundTheme) return EDITOR_BACKGROUND_COLORS[props.editorBackgroundTheme];
+  if (props.mode === "edit") return EDITOR_BACKGROUND_COLORS.light;
+  return "rgba(255, 255, 255, 0.56)";
+}
+
+function shouldShowCanvasBoundary() {
+  return props.showCanvasBoundary !== false;
+}
+
+function shouldAutoFitRuntimeView() {
+  return props.mode === "runtime" && props.autoFit !== false;
+}
+
+function updateWheelBehavior() {
+  if (!diagram) return;
+  const go = getGo();
+  diagram.toolManager.mouseWheelBehavior = props.enableWheelZoom === false
+    ? go.ToolManager.WheelNone
+    : go.ToolManager.WheelZoom;
+}
+
+function pickCandidateKind(part: GoJS.Part): PickCandidate["kind"] {
+  const go = getGo();
+  if (part instanceof go.Link) return "link";
+  if (part.data?.isGroup) return "group";
+  return "node";
+}
+
+function pickCandidateLabel(part: GoJS.Part) {
+  const go = getGo();
+  if (part instanceof go.Link) {
+    const from = props.topologyData?.nodes.find((node) => node.key === part.data?.from)?.label ?? part.data?.from;
+    const to = props.topologyData?.nodes.find((node) => node.key === part.data?.to)?.label ?? part.data?.to;
+    return part.data?.label || `${from} -> ${to}`;
+  }
+  return part.data?.label || part.data?.key || "";
+}
+
+function collectPickCandidates(point: GoJS.Point): PickCandidate[] {
+  if (!diagram || props.mode !== "edit") return [];
+  const go = getGo();
+  const candidates: PickCandidate[] = [];
+  const visited = new Set<string>();
+  const parts = diagram.findPartsAt(point, true);
+
+  parts.each((part: GoJS.Part) => {
+    if (!(part instanceof go.Node) && !(part instanceof go.Link)) return;
+    const key = part.data?.key;
+    if (!key || visited.has(key) || !part.selectable || !part.visible) return;
+    visited.add(key);
+    candidates.push({
+      key,
+      label: pickCandidateLabel(part),
+      kind: pickCandidateKind(part),
+      zOrder: Number.isFinite(part.zOrder) ? Number(part.zOrder) : Number(part.data?.zOrder) || 0,
+      part
+    });
+  });
+
+  return candidates.sort((left, right) => {
+    const zDelta = right.zOrder - left.zOrder;
+    if (zDelta) return zDelta;
+    const kindDelta = ["node", "group", "link"].indexOf(left.kind) - ["node", "group", "link"].indexOf(right.kind);
+    return kindDelta || left.key.localeCompare(right.key);
+  });
+}
+
+function pointCycleKey(point: GoJS.Point) {
+  return `${Math.round(point.x)}:${Math.round(point.y)}`;
+}
+
+function samePickKeys(left: string[], right: string[]) {
+  return left.length === right.length && left.every((key, index) => key === right[index]);
+}
+
+function selectPickCandidate(candidate: PickCandidate) {
+  if (!diagram) return;
+  pickMenu.value = null;
+  diagram.select(candidate.part);
+  emit("selectionChange", candidate.key);
+  refreshPortVisibility();
+}
+
+function cyclePickCandidate(input: GoJS.InputEvent) {
+  if (!diagram || props.mode !== "edit") return false;
+  const candidates = collectPickCandidates(input.documentPoint);
+  if (candidates.length <= 1) return false;
+
+  const keys = candidates.map((candidate) => candidate.key);
+  const pointKey = pointCycleKey(input.documentPoint);
+  const selectedPart = diagram.selection.first();
+  const selectedKey = selectedPart?.data?.key ?? props.selectedKey ?? "";
+  const shouldStartNewCycle = !lastPickCycle
+    || lastPickCycle.pointKey !== pointKey
+    || !samePickKeys(lastPickCycle.keys, keys);
+
+  if (shouldStartNewCycle) {
+    const currentIndex = keys.indexOf(selectedKey);
+    lastPickCycle = {
+      pointKey,
+      keys,
+      index: currentIndex >= 0 ? (currentIndex + 1) % keys.length : 0
+    };
+  } else {
+    lastPickCycle.index = (lastPickCycle.index + 1) % keys.length;
+  }
+
+  selectPickCandidate(candidates[lastPickCycle.index]);
+  return true;
+}
+
+function openPickMenu(input: GoJS.InputEvent) {
+  if (!diagram || props.mode !== "edit" || !canvasEl.value) return false;
+  const candidates = collectPickCandidates(input.documentPoint);
+  if (candidates.length <= 1) return false;
+  const viewPoint = input.viewPoint;
+  const rect = canvasEl.value.getBoundingClientRect();
+  pickMenu.value = {
+    visible: true,
+    x: clampNumber(viewPoint.x, 8, Math.max(8, rect.width - 320)),
+    y: clampNumber(viewPoint.y, 8, Math.max(8, rect.height - 260)),
+    candidates
+  };
+  return true;
+}
+
+function closePickMenu() {
+  pickMenu.value = null;
+}
+
+function isMiniViewCorner(value: unknown): value is MiniViewCorner {
+  return value === "top-left"
+    || value === "top-right"
+    || value === "bottom-left"
+    || value === "bottom-right";
+}
+
+function loadMiniViewState() {
+  try {
+    const rawValue = window.localStorage.getItem(MINI_VIEW_STORAGE_KEY);
+    if (!rawValue) return;
+    const value = JSON.parse(rawValue) as { corner?: unknown; collapsed?: unknown };
+    if (isMiniViewCorner(value.corner)) miniViewCorner.value = value.corner;
+    if (typeof value.collapsed === "boolean") miniViewCollapsed.value = value.collapsed;
+  } catch {
+    // Ignore stale localStorage values and keep the default corner.
+  }
+}
+
+function saveMiniViewState() {
+  try {
+    window.localStorage.setItem(MINI_VIEW_STORAGE_KEY, JSON.stringify({
+      corner: miniViewCorner.value,
+      collapsed: miniViewCollapsed.value
+    }));
+  } catch {
+    // Storage can be unavailable in private modes; the panel still works.
+  }
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  if (max < min) return min;
+  return Math.min(Math.max(value, min), max);
+}
+
+function clampMiniViewPanelPosition(left: number, top: number) {
+  const containerRect = canvasEl.value?.getBoundingClientRect();
+  const miniViewRect = miniViewEl.value?.getBoundingClientRect();
+  if (!containerRect || !miniViewRect) return { left, top };
+
+  return {
+    left: clampNumber(left, MINI_VIEW_MARGIN, containerRect.width - miniViewRect.width - MINI_VIEW_MARGIN),
+    top: clampNumber(top, MINI_VIEW_MARGIN, containerRect.height - miniViewRect.height - MINI_VIEW_MARGIN)
+  };
+}
+
+function getNearestMiniViewCorner(position: { left: number; top: number }): MiniViewCorner {
+  const containerRect = canvasEl.value?.getBoundingClientRect();
+  const miniViewRect = miniViewEl.value?.getBoundingClientRect();
+  if (!containerRect || !miniViewRect) return miniViewCorner.value;
+
+  const centerX = position.left + miniViewRect.width / 2;
+  const centerY = position.top + miniViewRect.height / 2;
+  const vertical = centerY < containerRect.height / 2 ? "top" : "bottom";
+  const horizontal = centerX < containerRect.width / 2 ? "left" : "right";
+  return `${vertical}-${horizontal}` as MiniViewCorner;
+}
+
+function redrawOverviewSoon() {
+  window.setTimeout(() => {
+    overview?.requestUpdate();
+    overview?.redraw();
+    updateOverviewViewportBoxVisibility();
+  }, 0);
+}
+
+function toggleMiniViewCollapsed() {
+  miniViewCollapsed.value = !miniViewCollapsed.value;
+  miniViewPanelPosition.value = null;
+  saveMiniViewState();
+  if (!miniViewCollapsed.value) redrawOverviewSoon();
+}
+
+function handleMiniViewPanelPointerDown(event: PointerEvent) {
+  if (event.button !== 0 || !miniViewEl.value || !canvasEl.value) return;
+
+  const containerRect = canvasEl.value.getBoundingClientRect();
+  const miniViewRect = miniViewEl.value.getBoundingClientRect();
+  const startPosition = clampMiniViewPanelPosition(
+    miniViewRect.left - containerRect.left,
+    miniViewRect.top - containerRect.top
+  );
+
+  miniViewPanelPosition.value = startPosition;
+  miniViewPanelDrag = {
+    didMove: false,
+    pointerId: event.pointerId,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startLeft: startPosition.left,
+    startTop: startPosition.top
+  };
+
+  miniViewEl.value.setPointerCapture(event.pointerId);
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleMiniViewPanelPointerMove(event: PointerEvent) {
+  if (!miniViewPanelDrag || event.pointerId !== miniViewPanelDrag.pointerId) return;
+
+  const deltaX = event.clientX - miniViewPanelDrag.startClientX;
+  const deltaY = event.clientY - miniViewPanelDrag.startClientY;
+  if (Math.abs(deltaX) > 1 || Math.abs(deltaY) > 1) miniViewPanelDrag.didMove = true;
+  miniViewPanelPosition.value = clampMiniViewPanelPosition(
+    miniViewPanelDrag.startLeft + deltaX,
+    miniViewPanelDrag.startTop + deltaY
+  );
+
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function handleMiniViewPanelPointerEnd(event: PointerEvent) {
+  if (!miniViewEl.value || !miniViewPanelDrag || event.pointerId !== miniViewPanelDrag.pointerId) return;
+
+  if (miniViewEl.value.hasPointerCapture(event.pointerId)) miniViewEl.value.releasePointerCapture(event.pointerId);
+  const finalPosition = miniViewPanelPosition.value;
+  if (finalPosition && miniViewPanelDrag.didMove) {
+    miniViewCorner.value = getNearestMiniViewCorner(finalPosition);
+    saveMiniViewState();
+  }
+  miniViewPanelPosition.value = null;
+  miniViewPanelDrag = null;
+
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function overviewDocumentPointFromPointer(event: PointerEvent) {
@@ -1340,31 +2073,60 @@ function updateOverviewViewportBoxVisibility() {
   overview.requestUpdate();
 }
 
+function updateCanvasBoundary() {
+  if (!diagram) return;
+  if (!shouldShowCanvasBoundary()) {
+    if (canvasBoundaryPart) canvasBoundaryPart.visible = false;
+    diagram.requestUpdate();
+    overview?.requestUpdate();
+    overview?.redraw();
+    return;
+  }
+  const go = getGo();
+  const $ = go.GraphObject.make;
+  const canvas = normalizeCanvasConfig(props.topologyData?.canvas);
+  const fill = resolveCanvasBoundaryFill();
+
+  if (!canvasBoundaryPart) {
+    canvasBoundaryPart =
+      $(go.Part, "Spot",
+        {
+          layerName: "Background",
+          location: new go.Point(0, 0),
+          locationSpot: go.Spot.TopLeft,
+          pickable: false,
+          selectable: false,
+          isLayoutPositioned: false
+        },
+        $(go.Shape, "Rectangle", {
+          name: CANVAS_BOUNDARY_SHAPE_NAME,
+          desiredSize: new go.Size(canvas.width, canvas.height),
+          fill,
+          stroke: "#94a3b8",
+          strokeDashArray: [10, 6],
+          strokeWidth: 1.5
+        })
+      ) as GoJS.Part;
+    diagram.add(canvasBoundaryPart);
+  }
+
+  const boundaryShape = canvasBoundaryPart.findObject(CANVAS_BOUNDARY_SHAPE_NAME) as GoJS.Shape | null;
+  if (boundaryShape) {
+    boundaryShape.desiredSize = new go.Size(canvas.width, canvas.height);
+    boundaryShape.fill = fill;
+  }
+  canvasBoundaryPart.location = new go.Point(0, 0);
+  canvasBoundaryPart.visible = true;
+  diagram.requestUpdate();
+  overview?.requestUpdate();
+  overview?.redraw();
+}
+
 function fitRuntimeView() {
   if (!diagram) return;
-  const go = getGo();
-  const bounds = diagram.documentBounds;
-  const viewportWidth = diagram.div?.clientWidth ?? 0;
-  const viewportHeight = diagram.div?.clientHeight ?? 0;
-  if (
-    !Number.isFinite(bounds.x)
-    || !Number.isFinite(bounds.y)
-    || bounds.width <= 0
-    || bounds.height <= 0
-    || viewportWidth <= 0
-    || viewportHeight <= 0
-  ) return;
-
-  const padding = 80;
-  const scale = Math.min(
-    1,
-    Math.max(0.2, Math.min((viewportWidth - padding) / bounds.width, (viewportHeight - padding) / bounds.height))
-  );
-  diagram.scale = scale;
-  diagram.position = new go.Point(
-    bounds.x - padding / 2 / scale,
-    bounds.y - padding / 2 / scale
-  );
+  const canvasBounds = getCanvasBounds();
+  if (canvasBounds && fitDiagramToBounds(canvasBounds)) return;
+  fitDiagramToBounds(diagram.documentBounds);
 }
 
 function exportSvg() {
@@ -1514,6 +2276,7 @@ function createDiagram(el: HTMLDivElement) {
     override doDeactivate() {
       super.doDeactivate();
       refreshPortVisibility();
+      updateCanvasBoundary();
     }
   }
 
@@ -1526,6 +2289,539 @@ function createDiagram(el: HTMLDivElement) {
     override doDeactivate() {
       super.doDeactivate();
       refreshPortVisibility();
+      updateCanvasBoundary();
+    }
+  }
+
+  class AlignmentGuideDraggingTool extends go.DraggingTool {
+    private guideParts: GoJS.Part[] = [];
+    private readonly axisTolerance = 6;
+    private readonly alignmentEpsilon = 0.5;
+
+    override doActivate() {
+      super.doActivate();
+      this.updateCenterGuides();
+    }
+
+    override doMouseMove() {
+      super.doMouseMove();
+      this.updateCenterGuides(true);
+    }
+
+    override doDropOnto(point: GoJS.Point, object: GoJS.GraphObject) {
+      this.snapActivePartsToElements();
+      super.doDropOnto(point, object);
+    }
+
+    override doDeactivate() {
+      this.clearCenterGuides();
+      super.doDeactivate();
+    }
+
+    private clearCenterGuides() {
+      const targetDiagram = this.diagram;
+      if (!targetDiagram || !this.guideParts.length) return;
+      this.guideParts.forEach((part) => targetDiagram.remove(part));
+      this.guideParts = [];
+    }
+
+    private getBodyBounds(node: GoJS.Node) {
+      const body = node.findObject("BODY") ?? node.findObject("ROTATE_PANEL");
+      const bounds = body?.getDocumentBounds?.() ?? node.actualBounds;
+      return isRealRect(bounds) ? bounds : null;
+    }
+
+    private getBoundsCenter(bounds: GoJS.Rect) {
+      return new go.Point(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    }
+
+    private getActiveDraggingParts(targetDiagram: GoJS.Diagram) {
+      const parts = new go.Set();
+      const draggingParts = this.copiedParts ?? this.draggedParts;
+
+      if (draggingParts) {
+        const iterator = draggingParts.iterator;
+        while (iterator.next()) parts.add(iterator.key);
+      } else {
+        targetDiagram.selection.each((part) => parts.add(part));
+      }
+
+      return parts;
+    }
+
+    private getActiveNodes(targetDiagram: GoJS.Diagram, activeParts: GoJS.Set) {
+      const nodes: GoJS.Node[] = [];
+      activeParts.each((part) => {
+        if (part instanceof go.Node && part.visible && this.getBodyBounds(part)) nodes.push(part);
+      });
+      return nodes;
+    }
+
+    private getCombinedBounds(nodes: GoJS.Node[]) {
+      let left = Infinity;
+      let top = Infinity;
+      let right = -Infinity;
+      let bottom = -Infinity;
+
+      nodes.forEach((node) => {
+        const bounds = this.getBodyBounds(node);
+        if (!bounds) return;
+        left = Math.min(left, bounds.x);
+        top = Math.min(top, bounds.y);
+        right = Math.max(right, bounds.right);
+        bottom = Math.max(bottom, bounds.bottom);
+      });
+
+      if (![left, top, right, bottom].every(Number.isFinite)) return null;
+      return new go.Rect(left, top, Math.max(0, right - left), Math.max(0, bottom - top));
+    }
+
+    private getReferenceBounds(targetDiagram: GoJS.Diagram, excludedNodes: Set<GoJS.Node>) {
+      const references: GoJS.Rect[] = [];
+      targetDiagram.nodes.each((node) => {
+        if (!(node instanceof go.Node) || excludedNodes.has(node) || node.isSelected || !node.visible) return;
+        const bounds = this.getBodyBounds(node);
+        if (bounds) references.push(bounds);
+      });
+      return references;
+    }
+
+    private findBestAxisSnap(currentBounds: GoJS.Rect, references: GoJS.Rect[], axis: "x" | "y") {
+      const startKey = axis === "x" ? "x" : "y";
+      const sizeKey = axis === "x" ? "width" : "height";
+      const currentStart = currentBounds[startKey];
+      const currentCenter = currentStart + currentBounds[sizeKey] / 2;
+      const currentEnd = currentStart + currentBounds[sizeKey];
+      let best: { distance: number; delta: number; priority: number } | null = null;
+
+      const consider = (currentValue: number, referenceValue: number, priority: number) => {
+        const delta = referenceValue - currentValue;
+        const distance = Math.abs(delta);
+        if (distance > this.axisTolerance) return;
+        if (!best || distance < best.distance || (distance === best.distance && priority < best.priority)) {
+          best = { distance, delta, priority };
+        }
+      };
+
+      references.forEach((bounds) => {
+        const referenceStart = bounds[startKey];
+        const referenceCenter = referenceStart + bounds[sizeKey] / 2;
+        const referenceEnd = referenceStart + bounds[sizeKey];
+
+        consider(currentCenter, referenceCenter, 0);
+        consider(currentStart, referenceStart, 1);
+        consider(currentEnd, referenceEnd, 1);
+        consider(currentStart, referenceEnd, 2);
+        consider(currentEnd, referenceStart, 2);
+      });
+
+      return best?.delta ?? 0;
+    }
+
+    private snapActivePartsToElements() {
+      const targetDiagram = this.diagram;
+      if (!targetDiagram || props.mode !== "edit") return null;
+
+      const activeParts = this.getActiveDraggingParts(targetDiagram);
+      const activeNodes = this.getActiveNodes(targetDiagram, activeParts);
+      const currentBounds = this.getCombinedBounds(activeNodes);
+      if (!currentBounds) return null;
+
+      const excludedNodes = new Set(activeNodes);
+      const references = this.getReferenceBounds(targetDiagram, excludedNodes);
+      const deltaX = this.findBestAxisSnap(currentBounds, references, "x");
+      const deltaY = this.findBestAxisSnap(currentBounds, references, "y");
+
+      if (deltaX || deltaY) {
+        const snapOptions = new go.DraggingOptions();
+        targetDiagram.moveParts(activeParts, new go.Point(deltaX, deltaY), true, snapOptions);
+      }
+
+      return {
+        activeNodes,
+        bounds: this.getCombinedBounds(activeNodes),
+        excludedNodes,
+        references
+      };
+    }
+
+    private collectLocalAlignmentGuides(currentBounds: GoJS.Rect, references: GoJS.Rect[]) {
+      const guides = new Map<string, { orientation: "horizontal" | "vertical"; coordinate: number; start: number; end: number }>();
+
+      const addGuide = (orientation: "horizontal" | "vertical", coordinate: number, start: number, end: number) => {
+        const key = `${orientation}:${coordinate.toFixed(1)}`;
+        const existing = guides.get(key);
+        if (existing) {
+          existing.start = Math.min(existing.start, start);
+          existing.end = Math.max(existing.end, end);
+          return;
+        }
+        guides.set(key, { orientation, coordinate, start, end });
+      };
+
+      const isAligned = (first: number, second: number) => Math.abs(first - second) <= this.alignmentEpsilon;
+      const currentX = [currentBounds.x, currentBounds.x + currentBounds.width / 2, currentBounds.right];
+      const currentY = [currentBounds.y, currentBounds.y + currentBounds.height / 2, currentBounds.bottom];
+
+      references.forEach((bounds) => {
+        const referenceX = [bounds.x, bounds.x + bounds.width / 2, bounds.right];
+        const referenceY = [bounds.y, bounds.y + bounds.height / 2, bounds.bottom];
+        const verticalStart = Math.min(currentBounds.y, bounds.y) - 8;
+        const verticalEnd = Math.max(currentBounds.bottom, bounds.bottom) + 8;
+        const horizontalStart = Math.min(currentBounds.x, bounds.x) - 8;
+        const horizontalEnd = Math.max(currentBounds.right, bounds.right) + 8;
+
+        if (isAligned(currentX[1], referenceX[1])) {
+          addGuide("vertical", referenceX[1], verticalStart, verticalEnd);
+        }
+        [[0, 0], [0, 2], [2, 0], [2, 2]].forEach(([currentIndex, referenceIndex]) => {
+          if (isAligned(currentX[currentIndex], referenceX[referenceIndex])) {
+            addGuide("vertical", referenceX[referenceIndex], verticalStart, verticalEnd);
+          }
+        });
+
+        if (isAligned(currentY[1], referenceY[1])) {
+          addGuide("horizontal", referenceY[1], horizontalStart, horizontalEnd);
+        }
+        [[0, 0], [0, 2], [2, 0], [2, 2]].forEach(([currentIndex, referenceIndex]) => {
+          if (isAligned(currentY[currentIndex], referenceY[referenceIndex])) {
+            addGuide("horizontal", referenceY[referenceIndex], horizontalStart, horizontalEnd);
+          }
+        });
+      });
+
+      return [...guides.values()];
+    }
+
+    private addLocalAlignmentGuides(targetDiagram: GoJS.Diagram, currentBounds: GoJS.Rect, references: GoJS.Rect[]) {
+      this.collectLocalAlignmentGuides(currentBounds, references).forEach((guide) => {
+        const isHorizontal = guide.orientation === "horizontal";
+        const start = isHorizontal
+          ? new go.Point(guide.start, guide.coordinate)
+          : new go.Point(guide.coordinate, guide.start);
+        const length = Math.max(1, guide.end - guide.start);
+        const geometryString = isHorizontal ? `M 0 0 L ${length} 0` : `M 0 0 L 0 ${length}`;
+
+        this.addGuidePart(targetDiagram,
+          $(go.Part,
+            {
+              isInDocumentBounds: false,
+              layerName: "Tool",
+              location: start,
+              pickable: false,
+              selectable: false
+            },
+            $(go.Shape, {
+              geometryString,
+              stroke: "#ec4899",
+              strokeWidth: 1.8
+            })
+          ) as GoJS.Part
+        );
+      });
+    }
+
+    private isHorizontalCandidate(centerY: number, bounds: GoJS.Rect) {
+      return centerY >= bounds.y - this.axisTolerance && centerY <= bounds.bottom + this.axisTolerance;
+    }
+
+    private isVerticalCandidate(centerX: number, bounds: GoJS.Rect) {
+      return centerX >= bounds.x - this.axisTolerance && centerX <= bounds.right + this.axisTolerance;
+    }
+
+    private collectNearestGuides(targetDiagram: GoJS.Diagram, excludedNodes: Set<GoJS.Node>, currentBounds: GoJS.Rect, center: GoJS.Point) {
+      const nearest: Record<string, { distance: number; bounds: GoJS.Rect } | null> = {
+        left: null,
+        right: null,
+        up: null,
+        down: null
+      };
+      let hasHorizontalCenterHit = false;
+      let hasVerticalCenterHit = false;
+
+      targetDiagram.nodes.each((node) => {
+        if (!(node instanceof go.Node) || excludedNodes.has(node) || node.isSelected || !node.visible) return;
+
+        const bounds = this.getBodyBounds(node);
+        if (!bounds) return;
+
+        const otherCenter = this.getBoundsCenter(bounds);
+        if (Math.abs(otherCenter.y - center.y) <= this.axisTolerance) hasHorizontalCenterHit = true;
+        if (Math.abs(otherCenter.x - center.x) <= this.axisTolerance) hasVerticalCenterHit = true;
+
+        if (this.isHorizontalCandidate(center.y, bounds)) {
+          if (bounds.right <= currentBounds.x) {
+            const distance = currentBounds.x - bounds.right;
+            if (!nearest.left || distance < nearest.left.distance) nearest.left = { distance, bounds };
+          } else if (bounds.x >= currentBounds.right) {
+            const distance = bounds.x - currentBounds.right;
+            if (!nearest.right || distance < nearest.right.distance) nearest.right = { distance, bounds };
+          }
+        }
+
+        if (this.isVerticalCandidate(center.x, bounds)) {
+          if (bounds.bottom <= currentBounds.y) {
+            const distance = currentBounds.y - bounds.bottom;
+            if (!nearest.up || distance < nearest.up.distance) nearest.up = { distance, bounds };
+          } else if (bounds.y >= currentBounds.bottom) {
+            const distance = bounds.y - currentBounds.bottom;
+            if (!nearest.down || distance < nearest.down.distance) nearest.down = { distance, bounds };
+          }
+        }
+      });
+
+      return {
+        nearest,
+        hasHorizontalCenterHit,
+        hasVerticalCenterHit
+      };
+    }
+
+    private addGuidePart(targetDiagram: GoJS.Diagram, guidePart: GoJS.Part) {
+      targetDiagram.add(guidePart);
+      this.guideParts.push(guidePart);
+    }
+
+    private makeDistanceGuide(start: GoJS.Point, end: GoJS.Point, text: string, labelOffset: GoJS.Point) {
+      const labelPoint = new go.Point(
+        (start.x + end.x) / 2 + labelOffset.x,
+        (start.y + end.y) / 2 + labelOffset.y
+      );
+
+      return [
+        $(go.Part,
+          {
+            isInDocumentBounds: false,
+            layerName: "Tool",
+            location: start,
+            pickable: false,
+            selectable: false
+          },
+          $(go.Shape, {
+            geometryString: `M 0 0 L ${end.x - start.x} ${end.y - start.y}`,
+            stroke: "#0f766e",
+            strokeDashArray: [3, 3],
+            strokeWidth: 1.4
+          })
+        ) as GoJS.Part,
+        $(go.Part, "Auto",
+          {
+            isInDocumentBounds: false,
+            layerName: "Tool",
+            location: labelPoint,
+            locationSpot: go.Spot.Center,
+            pickable: false,
+            selectable: false
+          },
+          $(go.Shape, "RoundedRectangle", {
+            fill: "rgba(240, 253, 250, 0.95)",
+            stroke: "#0f766e",
+            strokeWidth: 1,
+            parameter1: 3
+          }),
+          $(go.TextBlock, text, {
+            font: "11px sans-serif",
+            margin: new go.Margin(2, 5, 2, 5),
+            stroke: "#0f766e"
+          })
+        ) as GoJS.Part
+      ];
+    }
+
+    private addDistanceGuides(targetDiagram: GoJS.Diagram, currentBounds: GoJS.Rect, center: GoJS.Point, nearest: Record<string, { distance: number; bounds: GoJS.Rect } | null>) {
+      const roundedText = (distance: number) => `${roundPointValue(distance)}px`;
+
+      if (nearest.left && nearest.left.distance >= 0) {
+        this.makeDistanceGuide(
+          new go.Point(nearest.left.bounds.right, center.y),
+          new go.Point(currentBounds.x, center.y),
+          roundedText(nearest.left.distance),
+          new go.Point(0, -12)
+        ).forEach((part) => this.addGuidePart(targetDiagram, part));
+      }
+
+      if (nearest.right && nearest.right.distance >= 0) {
+        this.makeDistanceGuide(
+          new go.Point(currentBounds.right, center.y),
+          new go.Point(nearest.right.bounds.x, center.y),
+          roundedText(nearest.right.distance),
+          new go.Point(0, -12)
+        ).forEach((part) => this.addGuidePart(targetDiagram, part));
+      }
+
+      if (nearest.up && nearest.up.distance >= 0) {
+        this.makeDistanceGuide(
+          new go.Point(center.x, nearest.up.bounds.bottom),
+          new go.Point(center.x, currentBounds.y),
+          roundedText(nearest.up.distance),
+          new go.Point(18, 0)
+        ).forEach((part) => this.addGuidePart(targetDiagram, part));
+      }
+
+      if (nearest.down && nearest.down.distance >= 0) {
+        this.makeDistanceGuide(
+          new go.Point(center.x, currentBounds.bottom),
+          new go.Point(center.x, nearest.down.bounds.y),
+          roundedText(nearest.down.distance),
+          new go.Point(18, 0)
+        ).forEach((part) => this.addGuidePart(targetDiagram, part));
+      }
+    }
+
+    private updateCenterGuides(shouldSnap = false) {
+      const targetDiagram = this.diagram;
+      if (!targetDiagram || props.mode !== "edit") return;
+
+      this.clearCenterGuides();
+
+      const viewportBounds = targetDiagram.viewportBounds;
+      if (!isRealRect(viewportBounds)) return;
+
+      const snapResult = shouldSnap ? this.snapActivePartsToElements() : null;
+      const activeParts = this.getActiveDraggingParts(targetDiagram);
+      const activeNodes = snapResult?.activeNodes ?? this.getActiveNodes(targetDiagram, activeParts);
+      const currentBounds = snapResult?.bounds ?? this.getCombinedBounds(activeNodes);
+      if (!currentBounds) return;
+
+      const excludedNodes = snapResult?.excludedNodes ?? new Set(activeNodes);
+      const references = snapResult?.references ?? this.getReferenceBounds(targetDiagram, excludedNodes);
+
+      const center = this.getBoundsCenter(currentBounds);
+      if (!Number.isFinite(center.x) || !Number.isFinite(center.y)) return;
+      const horizontalStartX = Math.min(viewportBounds.x, center.x);
+      const verticalStartY = Math.min(viewportBounds.y, center.y);
+      const horizontalLength = Math.max(1, viewportBounds.right - horizontalStartX);
+      const verticalLength = Math.max(1, viewportBounds.bottom - verticalStartY);
+      const { nearest, hasHorizontalCenterHit, hasVerticalCenterHit } = this.collectNearestGuides(targetDiagram, excludedNodes, currentBounds, center);
+
+      const horizontalGuide =
+        $(go.Part,
+          {
+            isInDocumentBounds: false,
+            layerName: "Tool",
+            location: new go.Point(horizontalStartX, center.y),
+            pickable: false,
+            selectable: false
+          },
+          $(go.Shape, {
+            geometryString: `M 0 0 L ${horizontalLength} 0`,
+            stroke: hasHorizontalCenterHit ? "#f59e0b" : "#2563eb",
+            strokeDashArray: [6, 4],
+            strokeWidth: hasHorizontalCenterHit ? 2.2 : 1.5
+          })
+        ) as GoJS.Part;
+
+      const verticalGuide =
+        $(go.Part,
+          {
+            isInDocumentBounds: false,
+            layerName: "Tool",
+            location: new go.Point(center.x, verticalStartY),
+            pickable: false,
+            selectable: false
+          },
+          $(go.Shape, {
+            geometryString: `M 0 0 L 0 ${verticalLength}`,
+            stroke: hasVerticalCenterHit ? "#f59e0b" : "#2563eb",
+            strokeDashArray: [6, 4],
+            strokeWidth: hasVerticalCenterHit ? 2.2 : 1.5
+          })
+        ) as GoJS.Part;
+
+      const centerMarker =
+        $(go.Part, "Spot",
+          {
+            isInDocumentBounds: false,
+            layerName: "Tool",
+            location: center,
+            locationSpot: go.Spot.Center,
+            pickable: false,
+            selectable: false
+          },
+          $(go.Shape, "Circle", {
+            desiredSize: new go.Size(7, 7),
+            fill: "#ffffff",
+            stroke: "#2563eb",
+            strokeWidth: 1.5
+          }),
+          $(go.TextBlock, `x:${roundPointValue(center.x)} y:${roundPointValue(center.y)}`, {
+            alignment: new go.Spot(1, 0, 8, -6),
+            alignmentFocus: go.Spot.BottomLeft,
+            background: "rgba(255, 255, 255, 0.92)",
+            font: "11px sans-serif",
+            margin: new go.Margin(2, 4, 2, 4),
+            stroke: "#1d4ed8"
+          })
+        ) as GoJS.Part;
+
+      [horizontalGuide, verticalGuide, centerMarker].forEach((guidePart) => {
+        this.addGuidePart(targetDiagram, guidePart);
+      });
+      this.addLocalAlignmentGuides(targetDiagram, currentBounds, references);
+      this.addDistanceGuides(targetDiagram, currentBounds, center, nearest);
+    }
+  }
+
+  const keyboardNudgeDelta = (key: string | undefined) => {
+    if (key === "Up" || key === "ArrowUp") return new go.Point(0, -1);
+    if (key === "Down" || key === "ArrowDown") return new go.Point(0, 1);
+    if (key === "Left" || key === "ArrowLeft") return new go.Point(-1, 0);
+    if (key === "Right" || key === "ArrowRight") return new go.Point(1, 0);
+    return null;
+  };
+
+  const isEditableKeyboardTarget = (target: EventTarget | null | undefined) => {
+    if (!(target instanceof HTMLElement)) return false;
+    const tagName = target.tagName.toLowerCase();
+    return tagName === "input"
+      || tagName === "textarea"
+      || tagName === "select"
+      || target.isContentEditable
+      || Boolean(target.closest("[contenteditable='true']"));
+  };
+
+  class KeyboardNudgeCommandHandler extends go.CommandHandler {
+    override doKeyDown() {
+      const targetDiagram = this.diagram;
+      const input = targetDiagram.lastInput;
+      const direction = keyboardNudgeDelta(input?.key);
+
+      if (
+        !direction
+        || props.mode !== "edit"
+        || targetDiagram.isReadOnly
+        || input.control
+        || input.meta
+        || input.alt
+        || isEditableKeyboardTarget(input.event?.target)
+      ) {
+        super.doKeyDown();
+        return;
+      }
+
+      const movableParts = new go.Set();
+      targetDiagram.selection.each((part) => {
+        if (part instanceof go.Node && part.canMove()) movableParts.add(part);
+      });
+
+      if (!movableParts.count) {
+        super.doKeyDown();
+        return;
+      }
+
+      const step = input.shift ? KEYBOARD_BIG_NUDGE_STEP : KEYBOARD_NUDGE_STEP;
+      const delta = new go.Point(direction.x * step, direction.y * step);
+      const dragOptions = new go.DraggingOptions();
+      try {
+        targetDiagram.startTransaction("keyboard nudge selection");
+        targetDiagram.moveParts(movableParts, delta, true, dragOptions);
+        targetDiagram.commitTransaction("keyboard nudge selection");
+      } catch (error) {
+        targetDiagram.rollbackTransaction();
+        throw error;
+      }
+      input.bubbles = false;
+      input.event?.preventDefault?.();
     }
   }
 
@@ -1537,6 +2833,8 @@ function createDiagram(el: HTMLDivElement) {
   const next = $(go.Diagram, el, {
     "undoManager.isEnabled": true,
     "animationManager.isEnabled": true,
+    // 大图初始淡入/缩放动画开销大且拖慢首屏，直接跳过
+    "animationManager.initialAnimationStyle": go.AnimationManager.None,
     allowHorizontalScroll: true,
     allowVerticalScroll: true,
     "draggingTool.gridSnapCellSize": new go.Size(SNAP_GRID_SIZE, SNAP_GRID_SIZE),
@@ -1546,15 +2844,18 @@ function createDiagram(el: HTMLDivElement) {
     "resizingTool.isGridSnapEnabled": true,
     "rotatingTool.snapAngleMultiple": 15,
     "rotatingTool.snapAngleEpsilon": 7.5,
+    "rotatingTool.handleAngle": ROTATE_HANDLE_ANGLE,
+    "rotatingTool.handleDistance": ROTATE_HANDLE_DISTANCE,
     "dragSelectingTool.isEnabled": false,
     "panningTool.isEnabled": true,
-    "toolManager.mouseWheelBehavior": go.ToolManager.WheelZoom,
+    "toolManager.mouseWheelBehavior": props.enableWheelZoom === false ? go.ToolManager.WheelNone : go.ToolManager.WheelZoom,
     allowDrop: props.mode === "edit",
     allowResize: props.mode === "edit",
     contentAlignment: go.Spot.Center,
     initialAutoScale: go.Diagram.Uniform,
     initialContentAlignment: go.Spot.Center,
     allowSelect: props.mode === "edit",
+    commandHandler: new KeyboardNudgeCommandHandler(),
     isReadOnly: props.mode === "runtime",
     mouseDrop: (event: GoJS.InputEvent) => finishDrop(event)
   }) as go.Diagram;
@@ -1571,6 +2872,11 @@ function createDiagram(el: HTMLDivElement) {
       $(go.Shape, "LineH", { interval: 5, stroke: "#c8d3e0", strokeWidth: 0.7 }),
       $(go.Shape, "LineV", { interval: 5, stroke: "#c8d3e0", strokeWidth: 0.7 })
     );
+  const draggingTool = new AlignmentGuideDraggingTool();
+  draggingTool.gridSnapCellSize = new go.Size(SNAP_GRID_SIZE, SNAP_GRID_SIZE);
+  draggingTool.gridSnapOrigin = new go.Point(0, 0);
+  draggingTool.isGridSnapEnabled = true;
+  next.toolManager.draggingTool = draggingTool;
   next.toolManager.linkReshapingTool = new SnapOrthogonalLinkReshapingTool();
   const linkingTool = new PortAwareLinkingTool();
   linkingTool.direction = go.LinkingTool.ForwardsOnly;
@@ -1580,32 +2886,6 @@ function createDiagram(el: HTMLDivElement) {
   relinkingTool.isEnabled = true;
   relinkingTool.portGravity = 32;
   next.toolManager.relinkingTool = relinkingTool;
-
-  const makeContextMenu = () =>
-    $("ContextMenu",
-      $("ContextMenuButton",
-        $(go.TextBlock, "复制"),
-        {
-          click: (event: GoJS.InputEvent) => event.diagram.commandHandler.copySelection()
-        }
-      ),
-      $("ContextMenuButton",
-        $(go.TextBlock, "粘贴"),
-        {
-          click: (event: GoJS.InputEvent) => {
-            if (props.mode === "edit") event.diagram.commandHandler.pasteSelection();
-          }
-        }
-      ),
-      $("ContextMenuButton",
-        $(go.TextBlock, "删除"),
-        {
-          click: (event: GoJS.InputEvent) => {
-            if (props.mode === "edit") event.diagram.commandHandler.deleteSelection();
-          }
-        }
-      )
-    );
 
   const makeLinkSelectionAdornment = () =>
     $(go.Adornment, "Link",
@@ -1622,9 +2902,9 @@ function createDiagram(el: HTMLDivElement) {
           fromArrow: "Circle",
           fill: "#ffffff",
           pickable: false,
-          scale: 0.85,
+          scale: 0.7,
           stroke: "#2563eb",
-          strokeWidth: 2
+          strokeWidth: 1.5
         }
       ),
       $(go.Shape,
@@ -1632,77 +2912,194 @@ function createDiagram(el: HTMLDivElement) {
           toArrow: "Circle",
           fill: "#ffffff",
           pickable: false,
-          scale: 0.85,
+          scale: 0.7,
           stroke: "#2563eb",
-          strokeWidth: 2
+          strokeWidth: 1.5
         }
       )
     );
 
-  const makeRealPort = (side: PortSide) =>
-    $(go.Shape, "Circle",
+  const startLinkFromAdornmentHandle = (event: GoJS.InputEvent, handle: GoJS.GraphObject) => {
+    if (props.mode !== "edit") return;
+    const targetDiagram = event.diagram;
+    const adornment = handle.part;
+    if (!(adornment instanceof go.Adornment)) return;
+    const adornedPart = adornment.adornedPart;
+    if (!(adornedPart instanceof go.Node)) return;
+    // 动态 itemTemplate 的端口数据挂在父 Panel，Shape 自身没有 data。
+    const portData = (handle.data ?? handle.panel?.data) as DiagramPortData | null | undefined;
+    if (!portData?.id) return;
+
+    targetDiagram.select(adornedPart);
+    refreshPortVisibility();
+
+    const visualPort = adornedPart.findPort(visualPortId(portData.id));
+    const startPort = visualPort ?? adornedPart.findPort(portData.id);
+    if (!startPort || !startPort.fromLinkable) return;
+
+    const tool = targetDiagram.toolManager.linkingTool as GoJS.LinkingTool;
+    tool.startObject = startPort;
+    targetDiagram.currentTool = tool;
+    tool.doActivate();
+
+    event.handled = true;
+    event.bubbles = false;
+  };
+
+  const makeAdornmentPortHandle = () =>
+    $(go.Panel, "Spot",
       {
-        cursor: "crosshair",
-        desiredSize: new go.Size(PORT_SIZE, PORT_SIZE),
-        fill: "rgba(255, 255, 255, 0.001)",
-        stroke: null,
-        strokeWidth: 0,
-        alignment: toGoRealPortAlignment(side),
         alignmentFocus: go.Spot.Center,
-        portId: side,
-        fromLinkable: false,
-        toLinkable: false,
-        fromMaxLinks: Infinity,
-        toMaxLinks: Infinity,
-        fromSpot: toGoSpot(side),
-        toSpot: toGoSpot(side),
-        opacity: 1,
-        pickable: false
+        visible: true
       },
-      new go.Binding("fromSpot", "__ports", (ports: DiagramPortData[] | undefined) => toGoSpot(portForSide(ports, side)?.side ?? side)),
-      new go.Binding("toSpot", "__ports", (ports: DiagramPortData[] | undefined) => toGoSpot(portForSide(ports, side)?.side ?? side))
+      new go.Binding("alignment", "", toGoAdornmentPortAlignment),
+      new go.Binding("visible", "direction", canLinkFrom),
+      $(go.Shape, "Circle",
+        {
+          cursor: "crosshair",
+          desiredSize: new go.Size(ADORNMENT_PORT_HANDLE_SIZE, ADORNMENT_PORT_HANDLE_SIZE),
+          fill: "#ffffff",
+          isActionable: true,
+          stroke: "#0f766e",
+          strokeWidth: 1.5,
+          toolTip:
+            $("ToolTip",
+              $(go.TextBlock,
+                { margin: 6, font: "12px sans-serif" },
+                new go.Binding("text", "", portTooltipText)
+              )
+            ),
+          actionDown: (event: GoJS.InputEvent, handle: GoJS.GraphObject) => startLinkFromAdornmentHandle(event, handle)
+        }
+      )
     );
 
-  const makeVisualPort = (side: PortSide, alignment: GoJS.Spot) =>
-    $(go.Shape, "Circle",
+  const makeNodeSelectionAdornment = () =>
+    $(go.Adornment, "Spot",
       {
-        name: portVisualName(side),
-        cursor: "crosshair",
-        desiredSize: new go.Size(PORT_SIZE, PORT_SIZE),
-        fill: "#ffffff",
-        stroke: "#0f766e",
-        strokeWidth: 2,
+        itemTemplate: makeAdornmentPortHandle()
+      },
+      new go.Binding("itemArray", "__ports"),
+      $(go.Panel, "Auto",
+        $(go.Shape, "Rectangle",
+          {
+            fill: null,
+            pickable: false,
+            stroke: "#2563eb",
+            strokeWidth: 1
+          }
+        ),
+        $(go.Placeholder, {
+          padding: 0
+        })
+      )
+    );
+
+  const makeResizeHandle = (alignment: GoJS.Spot, cursor: string) =>
+    $(go.Shape, "Rectangle",
+      {
         alignment,
-        alignmentFocus: go.Spot.Center,
-        portId: visualPortId(side),
-        fromLinkable: false,
-        toLinkable: false,
-        fromMaxLinks: Infinity,
-        toMaxLinks: Infinity,
-        fromSpot: toGoSpot(side),
-        toSpot: toGoSpot(side),
-        opacity: 0,
-        pickable: false,
-        toolTip:
-          $("ToolTip",
-            $(go.TextBlock,
-              { margin: 6, font: "12px sans-serif" },
-              new go.Binding("text", "__ports", (ports: DiagramPortData[] | undefined) => portLabelForSide(ports, side))
-            )
-          )
+        cursor,
+        desiredSize: new go.Size(RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE),
+        fill: "#ffffff",
+        stroke: "#2563eb",
+        strokeWidth: 1.5
       }
     );
 
-  const fixedPorts = [
-    makeRealPort("top"),
-    makeRealPort("right"),
-    makeRealPort("bottom"),
-    makeRealPort("left"),
-    makeVisualPort("top", new go.Spot(0.5, 0, 0, -PORT_VISUAL_OFFSET)),
-    makeVisualPort("right", new go.Spot(1, 0.5, PORT_VISUAL_OFFSET, 0)),
-    makeVisualPort("bottom", new go.Spot(0.5, 1, 0, PORT_VISUAL_OFFSET)),
-    makeVisualPort("left", new go.Spot(0, 0.5, -PORT_VISUAL_OFFSET, 0))
-  ];
+  const makeResizeAdornment = () =>
+    $(go.Adornment, "Spot",
+      $(go.Placeholder),
+      makeResizeHandle(go.Spot.TopLeft, "nw-resize"),
+      makeResizeHandle(go.Spot.Top, "n-resize"),
+      makeResizeHandle(go.Spot.TopRight, "ne-resize"),
+      makeResizeHandle(go.Spot.Right, "e-resize"),
+      makeResizeHandle(go.Spot.BottomRight, "se-resize"),
+      makeResizeHandle(go.Spot.Bottom, "s-resize"),
+      makeResizeHandle(go.Spot.BottomLeft, "sw-resize"),
+      makeResizeHandle(go.Spot.Left, "w-resize")
+    );
+
+  const makeRotateAdornment = () =>
+    $(go.Adornment,
+      { locationSpot: go.Spot.Center },
+      $(go.Shape,
+        {
+          geometryString: ROTATE_ICON_GEOMETRY,
+          desiredSize: new go.Size(12, 12),
+          // 箭头三角为填充 figure，圆弧仅描边
+          fill: "#2563eb",
+          stroke: "#2563eb",
+          strokeWidth: 1.5,
+          strokeCap: "round",
+          cursor: "grab",
+          // 描边图形本身命中区域太小，用透明背景扩大可点击范围
+          background: "rgba(255, 255, 255, 0.01)"
+        }
+      )
+    );
+
+  const toGoVisualAlignmentFromReal = (port: DiagramPortData) => {
+    const distance = PORT_VISUAL_OFFSET + PORT_SIZE / 2;
+    if (port.side === "left") return new go.Spot(0.5, 0.5, -distance, 0);
+    if (port.side === "right") return new go.Spot(0.5, 0.5, distance, 0);
+    if (port.side === "top") return new go.Spot(0.5, 0.5, 0, -distance);
+    return new go.Spot(0.5, 0.5, 0, distance);
+  };
+
+  const makePortItem = () =>
+    $(go.Panel, "Spot",
+      {
+        alignmentFocusName: "REAL_PORT",
+        alignmentFocus: go.Spot.Center
+      },
+      new go.Binding("alignment", "", (port: DiagramPortData) => toGoPortAlignment(port, PORT_SIZE / 2)),
+      $(go.Shape, "Circle",
+        {
+          name: "REAL_PORT",
+          cursor: "crosshair",
+          desiredSize: new go.Size(PORT_SIZE, PORT_SIZE),
+          fill: "rgba(255, 255, 255, 0.001)",
+          fromLinkable: false,
+          fromMaxLinks: Infinity,
+          opacity: 1,
+          pickable: false,
+          stroke: null,
+          strokeWidth: 0,
+          toLinkable: false,
+          toMaxLinks: Infinity
+        },
+        new go.Binding("portId", "id"),
+        new go.Binding("fromSpot", "side", toGoSpot),
+        new go.Binding("toSpot", "side", toGoSpot)
+      ),
+      $(go.Shape, "Circle",
+        {
+          cursor: "crosshair",
+          desiredSize: new go.Size(PORT_SIZE, PORT_SIZE),
+          fill: "#ffffff",
+          fromLinkable: false,
+          fromMaxLinks: Infinity,
+          opacity: 0,
+          pickable: false,
+          stroke: "#0f766e",
+          strokeWidth: 1.5,
+          toLinkable: false,
+          toMaxLinks: Infinity,
+          toolTip:
+            $("ToolTip",
+              $(go.TextBlock,
+                { margin: 6, font: "12px sans-serif" },
+                new go.Binding("text", "", portTooltipText)
+              )
+            )
+        },
+        new go.Binding("alignment", "", toGoVisualAlignmentFromReal),
+        new go.Binding("portId", "id", visualPortId),
+        new go.Binding("fromSpot", "side", toGoSpot),
+        new go.Binding("toSpot", "side", toGoSpot)
+      )
+    );
 
   const shouldShowToArrow = (link: DiagramLinkData) => link.showArrow === true && (link.direction ?? "forward") !== "reverse";
   const shouldShowFromArrow = (link: DiagramLinkData) => link.showArrow === true && ["reverse", "both"].includes(link.direction ?? "forward");
@@ -1710,14 +3107,16 @@ function createDiagram(el: HTMLDivElement) {
   next.nodeTemplate =
     $(go.Node, "Spot",
       {
-        contextMenu: makeContextMenu(),
         locationSpot: go.Spot.Center,
         resizable: true,
         rotatable: true,
         rotateObjectName: "ROTATE_PANEL",
         rotationSpot: go.Spot.Center,
         resizeObjectName: "BODY",
-        selectionObjectName: "ROTATE_PANEL",
+        selectionObjectName: "CLICK_AREA",
+        selectionAdornmentTemplate: makeNodeSelectionAdornment(),
+        resizeAdornmentTemplate: makeResizeAdornment(),
+        rotateAdornmentTemplate: makeRotateAdornment(),
         selectable: props.mode === "edit",
         click: (_event, node) => {
           const part = node as GoJS.Node;
@@ -1754,33 +3153,49 @@ function createDiagram(el: HTMLDivElement) {
           emitConfiguredNodeEvents(part.data, "contextMenu");
         }
       },
+      new go.Binding("cursor", "", resolveNodeCursor),
       new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
       new go.Binding("visible", "runtime", (runtime) => props.mode === "edit" || runtime?.visible !== false),
       new go.Binding("zOrder", "zOrder", normalizeZOrder),
       $(go.Panel, "Spot",
         {
           name: "ROTATE_PANEL",
-          isPanelMain: true,
-          background: "transparent"
+          isPanelMain: true
         },
         new go.Binding("angle", "angle", normalizeNodeAngle).makeTwoWay((angle) => Math.round(Number(angle) * 100) / 100),
-        $(go.Panel, "Spot",
+        $(go.Shape, "RoundedRectangle",
           {
-            name: "BODY",
-            isPanelMain: true,
-            background: "transparent"
+            name: "CLICK_AREA",
+            alignment: go.Spot.Center,
+            fill: "rgba(255, 255, 255, 0.001)",
+            stroke: null
           },
-          new go.Binding("desiredSize", "size", go.Size.parse).makeTwoWay(go.Size.stringify),
-          $(go.Shape, "Rectangle",
+          new go.Binding("desiredSize", "size", (size) => {
+            const parsed = go.Size.parse(size);
+            return new go.Size(parsed.width + NODE_CLICK_PADDING * 2, parsed.height + NODE_CLICK_PADDING * 2);
+          })
+        ),
+        // GoJS 2.3 的 Spot Panel.itemArray 只保留首个静态元素；完整 BODY 必须作为端口容器的首个元素。
+        $(go.Panel, "Spot",
+          { itemTemplate: makePortItem() },
+          new go.Binding("itemArray", "__ports"),
+          $(go.Panel, "Spot",
             {
-              stretch: go.GraphObject.Fill,
-              fill: "transparent",
-              stroke: "transparent"
+              name: "BODY",
+              isPanelMain: true,
+              background: "transparent"
             },
-            new go.Binding("stroke", "runtime", resolveNodeStatusColor),
-            new go.Binding("strokeWidth", "runtime", (runtime) => hasNodeRuntimeStatus(runtime) ? 2 : 0),
-            new go.Binding("opacity", "runtime", (runtime) => runtime?.opacity ?? 1)
-          ),
+            new go.Binding("desiredSize", "size", go.Size.parse).makeTwoWay(go.Size.stringify),
+            $(go.Shape, "Rectangle",
+              {
+                stretch: go.GraphObject.Fill,
+                fill: "transparent",
+                stroke: "transparent"
+              },
+              new go.Binding("stroke", "", resolveNodeStatusColor),
+              new go.Binding("strokeWidth", "", (node: DiagramNodeData) => hasNodeRuntimeStatus(node) ? 2 : 0),
+              new go.Binding("opacity", "runtime", (runtime) => runtime?.opacity ?? 1)
+            ),
           $(go.Picture,
             {
               alignment: go.Spot.Center,
@@ -1886,19 +3301,24 @@ function createDiagram(el: HTMLDivElement) {
             }),
             new go.Binding("font", "", resolveAnnotationTextFont),
             new go.Binding("stroke", "", resolveAnnotationTextColor),
+            new go.Binding("textAlign", "", resolveAnnotationTextAlign),
+            new go.Binding("isUnderline", "", (node: DiagramNodeData) => annotationHasTextDecoration(node, "underline")),
+            new go.Binding("isStrikethrough", "", (node: DiagramNodeData) => annotationHasTextDecoration(node, "line-through")),
+            new go.Binding("spacingAbove", "", resolveAnnotationLineSpacing),
+            new go.Binding("spacingBelow", "", resolveAnnotationLineSpacing),
             new go.Binding("text", "", resolveAnnotationText),
             new go.Binding("visible", "__isAnnotation")
+            )
           )
-        ),
-        ...fixedPorts.map((port) => port.copy())
+        )
       ),
       $(go.Panel, "Vertical",
         {
           alignment: new go.Spot(0.5, 1, 0, 8),
           alignmentFocus: go.Spot.Top,
-          background: "transparent"
+          pickable: false
         },
-        new go.Binding("alignment", "labelPosition", toGoLabelAlignment),
+        new go.Binding("alignment", "", toGoLabelAlignment),
         new go.Binding("alignmentFocus", "labelPosition", toGoLabelAlignmentFocus),
         new go.Binding("visible", "", shouldShowNodeLabel),
         $(go.TextBlock,
@@ -1912,6 +3332,11 @@ function createDiagram(el: HTMLDivElement) {
             overflow: go.TextBlock.OverflowEllipsis
           },
           new go.Binding("width", "size", getLabelWidth),
+          new go.Binding("font", "", resolveNodeLabelFont),
+          new go.Binding("stroke", "", resolveNodeLabelColor),
+          new go.Binding("textAlign", "", resolveNodeLabelTextAlign),
+          new go.Binding("isUnderline", "", (node: DiagramNodeData) => nodeLabelHasTextDecoration(node, "underline")),
+          new go.Binding("isStrikethrough", "", (node: DiagramNodeData) => nodeLabelHasTextDecoration(node, "line-through")),
           new go.Binding("text", "label")
         ),
         $(go.TextBlock,
@@ -1935,8 +3360,8 @@ function createDiagram(el: HTMLDivElement) {
             overflow: go.TextBlock.OverflowEllipsis
           },
           new go.Binding("width", "size", getLabelWidth),
-          new go.Binding("stroke", "runtime", resolveNodeStatusColor),
-          new go.Binding("text", "runtime", (runtime) => runtime?.status ? `状态：${runtime.status}` : "")
+          new go.Binding("stroke", "", resolveNodeStatusColor),
+          new go.Binding("text", "", (node: DiagramNodeData) => shouldUseNodeStatusColor(node) && node.runtime?.status ? `状态：${node.runtime.status}` : "")
         )
       )
     );
@@ -1944,13 +3369,14 @@ function createDiagram(el: HTMLDivElement) {
   next.groupTemplate =
     $(go.Group, "Spot",
       {
-        contextMenu: makeContextMenu(),
         locationSpot: go.Spot.Center,
         computesBoundsAfterDrag: true,
         handlesDragDropForMembers: true,
         resizable: true,
         resizeObjectName: "BODY",
         selectionObjectName: "BODY",
+        selectionAdornmentTemplate: makeNodeSelectionAdornment(),
+        resizeAdornmentTemplate: makeResizeAdornment(),
         selectable: props.mode === "edit",
         memberValidation: (group, part) => {
           if (!(part instanceof go.Node) || part.data.key === group.data.key) return false;
@@ -1958,45 +3384,46 @@ function createDiagram(el: HTMLDivElement) {
         },
         mouseDrop: () => {}
       },
+      new go.Binding("cursor", "", resolveNodeCursor),
       new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
       new go.Binding("zOrder", "zOrder", normalizeZOrder),
-      $(go.Panel, "Auto",
-        {
-          name: "BODY"
-        },
-        new go.Binding("desiredSize", "size", go.Size.parse).makeTwoWay(go.Size.stringify),
-        $(go.Shape, "RoundedRectangle",
-          { fill: "#eef6ff", stroke: "#3b82f6", strokeWidth: 1.5 },
-          new go.Binding("fill", "", resolveGroupFill),
-          new go.Binding("stroke", "", resolveGroupStroke),
-          new go.Binding("strokeDashArray", "", resolveGroupStrokeDash)
-        ),
-        $(go.Picture,
+      // Group 同样用单独容器隔离动态端口，避免 itemArray 重建时移除 BODY 内容。
+      $(go.Panel, "Spot",
+        { itemTemplate: makePortItem() },
+        new go.Binding("itemArray", "__ports"),
+        $(go.Panel, "Auto",
           {
-            alignment: go.Spot.Center,
-            stretch: go.GraphObject.Fill,
-            imageStretch: go.GraphObject.UniformToFill
+            name: "BODY"
           },
-          new go.Binding("desiredSize", "size", getIconDesiredSize),
-          new go.Binding("source", "__icon"),
-          new go.Binding("visible", "", (node: DiagramNodeData) => node.__isContainer === true && node.__hasImageIcon === true)
-        ),
-        $(go.Panel, "Vertical",
+          new go.Binding("desiredSize", "size", go.Size.parse).makeTwoWay(go.Size.stringify),
+          $(go.Shape, "RoundedRectangle",
+            { fill: "#eef6ff", stroke: "#3b82f6", strokeWidth: 1.5 },
+            new go.Binding("fill", "", resolveGroupFill),
+            new go.Binding("stroke", "", resolveGroupStroke),
+            new go.Binding("strokeDashArray", "", resolveGroupStrokeDash)
+          ),
+          $(go.Picture,
+            {
+              alignment: go.Spot.Center,
+              stretch: go.GraphObject.Fill,
+              imageStretch: go.GraphObject.UniformToFill
+            },
+            new go.Binding("desiredSize", "size", getIconDesiredSize),
+            new go.Binding("source", "__icon"),
+            new go.Binding("visible", "", (node: DiagramNodeData) => node.__isContainer === true && node.__hasImageIcon === true)
+          ),
           $(go.TextBlock,
-            { margin: 8, font: "700 13px sans-serif", alignment: go.Spot.Left },
+            { margin: 8, font: "700 13px sans-serif", alignment: go.Spot.TopLeft },
             new go.Binding("text", "label"),
             new go.Binding("visible", "", shouldShowGroupLabel)
-          ),
-          $(go.Placeholder, { padding: 18 })
+          )
         )
-      ),
-      ...fixedPorts.map((port) => port.copy())
+      )
     );
 
   next.linkTemplate =
     $(go.Link,
       {
-        contextMenu: makeContextMenu(),
         adjusting: go.Link.End,
         layerName: "",
         routing: go.Link.Orthogonal,
@@ -2041,6 +3468,8 @@ function createDiagram(el: HTMLDivElement) {
         new go.Binding("stroke", "", resolveLinkGlowColor),
         new go.Binding("strokeWidth", "", resolveLinkGlowWidth),
         new go.Binding("opacity", "", resolveLinkGlowOpacity),
+        new go.Binding("strokeCap", "", resolveLinkLineCap),
+        new go.Binding("strokeJoin", "", (link: DiagramLinkData) => resolveLinkLineCap(link) === "round" ? "round" : "miter"),
         new go.Binding("strokeDashArray", "", resolveLinkDash)
       ),
       $(go.Shape,
@@ -2097,14 +3526,21 @@ function createDiagram(el: HTMLDivElement) {
   }));
 
   next.addModelChangedListener((event: GoJS.ChangedEvent) => {
-    if (props.mode !== "edit" || applyingModel || !event.isTransactionFinished || !props.topologyData) return;
+    if (props.mode !== "edit" || applyingModel || suppressChangeEmit || !event.isTransactionFinished || !props.topologyData) return;
+    if (changeEmitScheduled) return;
 
-    const model = next.model as GoJS.GraphLinksModel;
-    skipNextTopologyApply = true;
-    emit("change", {
-      ...props.topologyData,
-      nodes: exportDiagramNodes(model),
-      links: exportDiagramLinks(model)
+    // 微任务合并：一次交互产生的多个事务（如连线的 normalize + 路由同步）只做一次全量导出
+    changeEmitScheduled = true;
+    queueMicrotask(() => {
+      changeEmitScheduled = false;
+      if (!diagram || props.mode !== "edit" || !props.topologyData) return;
+      const model = diagram.model as GoJS.GraphLinksModel;
+      skipNextTopologyApply = true;
+      emit("change", {
+        ...props.topologyData,
+        nodes: exportDiagramNodes(model),
+        links: exportDiagramLinks(model)
+      });
     });
   });
 
@@ -2153,6 +3589,41 @@ function createDiagram(el: HTMLDivElement) {
   next.addDiagramListener("LinkDrawn", (event) => normalizeAndSyncLink(event.subject as GoJS.Link));
   next.addDiagramListener("LinkRelinked", (event) => normalizeAndSyncLink(event.subject as GoJS.Link));
   next.addDiagramListener("LinkReshaped", (event) => syncLinkRoute(event.subject as GoJS.Link));
+
+  const isAltInput = (input: GoJS.InputEvent) => input.alt || input.event?.altKey;
+
+  next.addDiagramListener("ObjectSingleClicked", (event) => {
+    const input = event.diagram.lastInput;
+    if (!isAltInput(input)) {
+      closePickMenu();
+      lastPickCycle = null;
+      return;
+    }
+    const handled = cyclePickCandidate(input);
+    if (handled) {
+      event.handled = true;
+      closePickMenu();
+    }
+  });
+
+  next.addDiagramListener("ObjectContextClicked", (event) => {
+    const input = event.diagram.lastInput;
+    if (!isAltInput(input)) return;
+    const handled = openPickMenu(input);
+    if (handled) event.handled = true;
+  });
+
+  next.addDiagramListener("ObjectDoubleClicked", (event) => {
+    const input = event.diagram.lastInput;
+    if (!isAltInput(input)) return;
+    const handled = openPickMenu(input);
+    if (handled) event.handled = true;
+  });
+
+  next.addDiagramListener("BackgroundSingleClicked", () => {
+    closePickMenu();
+    lastPickCycle = null;
+  });
 
   next.addDiagramListener("ChangedSelection", () => {
     refreshPortVisibility();
@@ -2212,10 +3683,16 @@ function createOverview(el: HTMLDivElement, observedDiagram: GoJS.Diagram) {
   return nextOverview;
 }
 
+function refreshAnimatedLinkFlag() {
+  hasAnimatedLinks = Boolean(diagram
+    && ((diagram.model as GoJS.GraphLinksModel).linkDataArray as DiagramLinkData[])
+      .some((link) => resolveLinkAnimated(link)));
+}
+
 function startFlowAnimation() {
   stopFlowAnimation();
   flowTimer = window.setInterval(() => {
-    if (!diagram) return;
+    if (!diagram || !hasAnimatedLinks || document.hidden) return;
     flowOffset = (flowOffset + 1) % 100000;
     let shouldRefreshFlow = false;
     diagram.links.each((link) => {
@@ -2236,23 +3713,34 @@ function stopFlowAnimation() {
   flowTimer = undefined;
 }
 
-function applyTopology() {
+async function applyTopology() {
   if (!diagram || !props.topologyData) return;
+  const token = ++topologyApplyToken;
+  const topologyData = props.topologyData;
+  const nodeTypes = props.nodeTypes;
+  await prepareTopologyAssets(topologyData, nodeTypes);
+  if (token !== topologyApplyToken || !diagram || props.topologyData !== topologyData) return;
   const go = getGo();
 
+  closePickMenu();
+  lastPickCycle = null;
   applyingModel = true;
   diagram.model = configureModel(new go.GraphLinksModel({
-    nodeDataArray: buildDiagramNodes(props.topologyData.nodes),
-    linkDataArray: buildDiagramLinks(props.topologyData.links)
+    nodeDataArray: buildDiagramNodes(topologyData.nodes),
+    linkDataArray: buildDiagramLinks(topologyData.links)
   }));
-  lastTopologyRenderSignature = getTopologyRenderSignature(props.topologyData);
+  updateCanvasBoundary();
+  acknowledgeAppliedTopology();
   updateDiagramMode();
+  refreshInteractionBindings();
   syncSelectedPart();
   applyingModel = false;
+  refreshAnimatedLinkFlag();
   overview?.requestUpdate();
   overview?.redraw();
   updateOverviewViewportBoxVisibility();
-  if (props.mode === "runtime") window.setTimeout(fitRuntimeView, 80);
+  if (shouldAutoFitRuntimeView()) window.setTimeout(fitRuntimeView, 80);
+  emit("ready");
 }
 
 function getDropNodeType(event: DragEvent) {
@@ -2300,38 +3788,99 @@ function handleDrop(event: DragEvent) {
   });
 }
 
+function fitRuntimeViewSoon() {
+  if (!shouldAutoFitRuntimeView()) return;
+  window.requestAnimationFrame(() => fitRuntimeView());
+}
+
+function setupResizeObserver() {
+  if (!canvasEl.value || typeof ResizeObserver === "undefined") {
+    window.addEventListener("resize", fitRuntimeViewSoon);
+    return;
+  }
+  resizeObserver = new ResizeObserver(fitRuntimeViewSoon);
+  resizeObserver.observe(canvasEl.value);
+}
+
+function teardownResizeObserver() {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  window.removeEventListener("resize", fitRuntimeViewSoon);
+}
+
 onMounted(() => {
+  loadMiniViewState();
   if (!canvasEl.value) return;
   diagram = createDiagram(canvasEl.value);
   if (overviewEl.value) overview = createOverview(overviewEl.value, diagram);
-  applyTopology();
+  void applyTopology();
+  setupResizeObserver();
   startFlowAnimation();
 });
 
 onBeforeUnmount(() => {
   stopFlowAnimation();
+  teardownResizeObserver();
+  if (assetExpiryTimer) {
+    window.clearTimeout(assetExpiryTimer);
+    assetExpiryTimer = undefined;
+  }
+  topologyApplyToken += 1;
+  miniViewPanelDrag = null;
   overview?.div && (overview.div = null);
   overview = null;
+  canvasBoundaryPart = null;
   diagram?.div && (diagram.div = null);
   diagram = null;
 });
 
 watch(() => props.topologyData, () => {
-  const nextSignature = getTopologyRenderSignature(props.topologyData);
   if (skipNextTopologyApply) {
     skipNextTopologyApply = false;
+    acknowledgeAppliedTopology();
+    return;
+  }
+  if (props.topologyData === lastAppliedTopology) return;
+  if (!topologySignatureFresh) {
+    lastTopologyRenderSignature = getTopologyRenderSignature(lastAppliedTopology);
+    topologySignatureFresh = true;
+  }
+  const nextSignature = getTopologyRenderSignature(props.topologyData);
+  if (nextSignature === lastTopologyRenderSignature) {
+    lastAppliedTopology = props.topologyData;
     lastTopologyRenderSignature = nextSignature;
     return;
   }
-  if (nextSignature === lastTopologyRenderSignature) {
-    return;
-  }
-  applyTopology();
+  void applyTopology();
 });
 
-watch(() => props.mode, updateDiagramMode);
+watch(() => props.mode, () => {
+  closePickMenu();
+  lastPickCycle = null;
+  updateDiagramMode();
+  updateWheelBehavior();
+  refreshInteractionBindings();
+  updateCanvasBoundary();
+  updateOverviewViewportBoxVisibility();
+  fitRuntimeViewSoon();
+});
 
-watch(() => props.nodeTypes, applyTopology, { deep: true });
+watch(() => props.editorBackgroundTheme, () => {
+  updateCanvasBoundary();
+  updateOverviewViewportBoxVisibility();
+});
+
+watch(() => props.showCanvasBoundary, () => {
+  updateCanvasBoundary();
+  updateOverviewViewportBoxVisibility();
+  fitRuntimeViewSoon();
+});
+
+watch(() => props.enableWheelZoom, updateWheelBehavior);
+
+watch(() => [props.autoFit, props.fitPadding, props.fitMaxScale], fitRuntimeViewSoon);
+
+watch(() => props.nodeTypes, () => void applyTopology());
 
 watch(() => props.selectedKey, syncSelectedPart);
 </script>
@@ -2345,8 +3894,52 @@ watch(() => props.selectedKey, syncSelectedPart);
       @dragover.capture="handleDragOver"
       @drop.capture="handleDrop"
     />
-    <div class="topology-miniview">
-      <div class="miniview-title">导航</div>
+    <div
+      v-if="pickMenu?.visible"
+      class="topology-pick-menu"
+      :style="{ left: `${pickMenu.x}px`, top: `${pickMenu.y}px` }"
+      @pointerdown.stop
+      @click.stop
+    >
+      <button
+        v-for="candidate in pickMenu.candidates"
+        :key="candidate.key"
+        type="button"
+        class="topology-pick-menu__item"
+        :class="{ active: selectedKey === candidate.key }"
+        @click="selectPickCandidate(candidate)"
+      >
+        <span class="topology-pick-menu__kind">
+          {{ candidate.kind === 'group' ? '组' : candidate.kind === 'link' ? '线' : '节点' }}
+        </span>
+        <span class="topology-pick-menu__label">{{ candidate.label }}</span>
+        <span class="topology-pick-menu__key">{{ candidate.key }}</span>
+      </button>
+    </div>
+    <div
+      ref="miniViewEl"
+      class="topology-miniview"
+      :class="{
+        'topology-miniview--collapsed': miniViewCollapsed,
+        'topology-miniview--dragging': Boolean(miniViewPanelDrag)
+      }"
+      :style="miniViewStyle"
+      @pointermove.capture="handleMiniViewPanelPointerMove"
+      @pointerup.capture="handleMiniViewPanelPointerEnd"
+      @pointercancel.capture="handleMiniViewPanelPointerEnd"
+    >
+      <div class="miniview-title" @pointerdown="handleMiniViewPanelPointerDown">
+        <span class="miniview-label">导航</span>
+        <button
+          type="button"
+          class="miniview-toggle"
+          :title="miniViewCollapsed ? '展开导航' : '收起导航'"
+          @pointerdown.stop
+          @click.stop="toggleMiniViewCollapsed"
+        >
+          {{ miniViewCollapsed ? '+' : '-' }}
+        </button>
+      </div>
       <div
         ref="overviewEl"
         class="topology-overview"

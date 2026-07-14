@@ -78,3 +78,17 @@ model TopologyOperationLog {
   @@index([topologyId])
   @@map("topology_operation_log")
 }
+
+model TopologyFile {
+  id           String   @id @default(cuid())
+  fileName     String   @map("file_name") @db.VarChar(255)
+  originalName String   @map("original_name") @db.VarChar(255)
+  contentType  String   @map("content_type") @db.VarChar(128)
+  fileSize     Int      @map("file_size")
+  businessType String   @default("topology-asset") @map("business_type") @db.VarChar(64)
+  storagePath  String   @map("storage_path") @db.VarChar(512)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([businessType])
+  @@map("topology_file")
+}

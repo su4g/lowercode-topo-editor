@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import ModuleNav from "../components/ModuleNav.vue";
-import { createTopology, listTopologies, type TopologySummary } from "../services/topologyApi";
+import { createTopology, deleteTopology, listTopologies, type TopologySummary } from "../services/topologyApi";
 
 const router = useRouter();
 const loading = ref(false);
@@ -54,6 +54,17 @@ async function confirmCreate() {
   await createNew();
 }
 
+async function removeTopology(row: TopologySummary) {
+  await ElMessageBox.confirm(`确定删除拓扑「${row.name}」吗？该操作会同时删除所有版本。`, "删除拓扑", {
+    confirmButtonText: "删除",
+    cancelButtonText: "取消",
+    type: "warning"
+  });
+  await deleteTopology(row.id);
+  ElMessage.success("拓扑已删除");
+  await load();
+}
+
 onMounted(load);
 </script>
 
@@ -82,10 +93,11 @@ onMounted(load);
           <el-table-column prop="status" label="状态" width="110" />
           <el-table-column prop="version" label="版本" width="100" />
           <el-table-column prop="updatedAt" label="更新时间" min-width="180" />
-          <el-table-column label="操作" width="210" fixed="right">
+          <el-table-column label="操作" width="240" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" @click="openEditor(row)">编辑</el-button>
               <el-button link @click="openRuntime(row)">预览</el-button>
+              <el-button link type="danger" @click="removeTopology(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>

@@ -1,4 +1,4 @@
-import type { LinkStyle } from "./rule";
+import type { ContainerStyle, LinkStyle } from "./rule";
 
 export type RuntimeVisibility = {
   ruleVisible?: boolean;
@@ -6,14 +6,16 @@ export type RuntimeVisibility = {
   manualVisible?: boolean;
   finalVisible?: boolean;
 };
-
 export type NodeRuntime = {
   visible?: boolean;
   text?: string;
   status?: string;
   color?: string;
   backgroundColor?: string;
+  backgroundOpacity?: number;
   borderColor?: string;
+  transparentBackground?: boolean;
+  dashedBorder?: boolean;
   opacity?: number;
   visibility?: RuntimeVisibility;
 };
@@ -35,9 +37,12 @@ export type LinkRuntime = {
 
 export type RuntimeStyle = {
   backgroundColor?: string;
+  backgroundOpacity?: number;
   borderColor?: string;
+  transparentBackground?: boolean;
+  dashedBorder?: boolean;
   opacity?: number;
-};
+} & ContainerStyle;
 
 export type RuntimePatch = {
   key: string;

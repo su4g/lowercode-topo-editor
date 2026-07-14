@@ -5,6 +5,7 @@ import type { DataSourceReference } from "@topo-editor/topology-shared";
 export type RuntimeQueryOptions = {
   preview?: boolean;
   parentParams?: Record<string, unknown>;
+  params?: Record<string, unknown>;
   metaData?: Record<string, unknown>;
   sources?: DataSourceReference[];
 };
@@ -17,6 +18,7 @@ export function queryRuntime(topologyId: string, sourceIds: string[], fields?: s
       fields,
       preview: options?.preview,
       parentParams: options?.parentParams,
+      params: options?.params,
       metaData: options?.metaData,
       sources: options?.sources
     })

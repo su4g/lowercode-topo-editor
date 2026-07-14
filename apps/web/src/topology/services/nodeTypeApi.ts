@@ -5,6 +5,10 @@ export function listNodeTypes(): Promise<NodeTypeDefinition[]> {
   return request<NodeTypeDefinition[]>("/api/topology/node-types");
 }
 
+export function listEnabledNodeTypes(): Promise<NodeTypeDefinition[]> {
+  return listNodeTypes();
+}
+
 export function saveNodeType(nodeType: NodeTypeDefinition): Promise<NodeTypeDefinition> {
   return request<NodeTypeDefinition>("/api/topology/node-types", {
     method: "POST",

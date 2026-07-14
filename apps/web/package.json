@@ -6,13 +6,16 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc -b && vite build",
-    "typecheck": "vue-tsc -b"
+    "typecheck": "vue-tsc -b",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "@topo-editor/topology-shared": "workspace:*",
     "@vitejs/plugin-vue": "^5.2.4",
     "element-plus": "^2.10.2",
     "gojs": "2.3.10",
+    "json-editor-vue": "^0.18.1",
     "pinia": "^2.3.1",
     "vue": "^3.5.17",
     "vue-router": "^4.5.1"
@@ -20,6 +23,7 @@
   "devDependencies": {
     "typescript": "^5.8.3",
     "vite": "^5.4.19",
+    "vitest": "^3.2.4",
     "vue-tsc": "^2.2.10"
   }
 }

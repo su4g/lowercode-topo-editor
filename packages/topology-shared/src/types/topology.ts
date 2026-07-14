@@ -18,11 +18,34 @@ export type NodeEventConfig = {
 
 export type NodeLabelPosition = "top" | "right" | "bottom" | "left";
 
+export type NodeLabelOffset = { x: number; y: number };
+
+export type NodeLabelStyle = {
+  color?: string;
+  fontSize?: number;
+  fontWeight?: string | number;
+  fontStyle?: "normal" | "italic";
+  textDecoration?: string;
+  textAlign?: "left" | "center" | "right";
+};
+
+export const DEFAULT_TOPOLOGY_CANVAS = {
+  width: 1920,
+  height: 1080
+};
+
+export type TopologyCanvasConfig = {
+  width: number;
+  height: number;
+};
+
 export type TopologyNode = {
   key: string;
   typeId: string;
   label: string;
   labelPosition?: NodeLabelPosition;
+  labelOffset?: NodeLabelOffset;
+  labelStyle?: NodeLabelStyle;
   loc: string;
   size?: string;
   angle?: number;
@@ -63,6 +86,7 @@ export type TopologyData = {
   nodes: TopologyNode[];
   links: TopologyLink[];
   globalRules?: GlobalTopologyRule[];
+  canvas?: TopologyCanvasConfig;
   viewport?: {
     position?: string;
     scale?: number;

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { createExpressionContext, pickExpressionFields, resolveExpressionValue, resolveTemplateString, type DataSourceConfig, type DataSourceReference, type DataSourceType, type ExpressionContext } from "@topo-editor/topology-shared";
+import { createExpressionContext, pickExpressionFields, readExpressionPath, resolveExpressionValue, resolveTemplateString, type DataSourceConfig, type DataSourceReference, type DataSourceType, type ExpressionContext } from "@topo-editor/topology-shared";
 import { prisma } from "../prisma/client";
 import { ok } from "../common/http";
 
@@ -8,6 +8,7 @@ type RuntimeQueryBody = {
   fields?: string[];
   preview?: boolean;
   parentParams?: Record<string, unknown>;
+  params?: Record<string, unknown>;
   metaData?: Record<string, unknown>;
   sources?: DataSourceReference[];
 };
@@ -18,6 +19,20 @@ function pickFields(data: Record<string, unknown>, fields?: string[]) {
 
 function resolveRecord<T extends Record<string, unknown>>(value: T | undefined, context: ExpressionContext) {
   return resolveExpressionValue(value ?? {}, context) as T;
+}
+
+function asRuntimePayload(value: unknown): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return value === undefined || value === null ? {} : { value };
+}
+
+function applyResponseMapping(data: Record<string, unknown>, config: DataSourceConfig) {
+  const rootPath = config.responseMapping?.rootPath?.trim();
+  return rootPath
+    ? asRuntimePayload(readExpressionPath(data, rootPath))
+    : data;
 }
 
 function createRuntimeUrl(rawUrl: string, query: Record<string, string>, context: ExpressionContext) {
@@ -32,21 +47,27 @@ function createRuntimeUrl(rawUrl: string, query: Record<string, string>, context
 async function queryHttpSource(config: DataSourceConfig, fields: string[] | undefined, templateContext: ExpressionContext) {
   if (!config.url) return {};
 
-  const headers = resolveRecord(config.headers, templateContext) as Record<string, string>;
-  const query = resolveRecord(config.query, templateContext) as Record<string, string>;
-  const method = config.method ?? "GET";
-  const url = createRuntimeUrl(config.url, query, templateContext);
-  const body = resolveRecord(config.body, templateContext);
-  const response = await fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      ...headers
-    },
-    ...(method === "POST" ? { body: JSON.stringify(body) } : {})
-  });
-  const payload = await response.json() as unknown;
-  return pickFields((payload ?? {}) as Record<string, unknown>, fields);
+  try {
+    const headers = resolveRecord(config.headers, templateContext) as Record<string, string>;
+    const query = resolveRecord(config.query, templateContext) as Record<string, string>;
+    const method = config.method ?? "GET";
+    const url = createRuntimeUrl(config.url, query, templateContext);
+    const body = resolveRecord(config.body, templateContext);
+    const response = await fetch(url, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...headers
+      },
+      signal: AbortSignal.timeout(10_000),
+      ...(method === "POST" ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) return {};
+    const payload = asRuntimePayload(await response.json() as unknown);
+    return pickFields(applyResponseMapping(payload, config), fields);
+  } catch {
+    return {};
+  }
 }
 
 async function querySource(sourceId: string, config: DataSourceConfig, type: DataSourceType | undefined, fields: string[] | undefined, preview: boolean, templateContext: ExpressionContext) {
@@ -67,7 +88,10 @@ export async function registerRuntimeRoutes(app: FastifyInstance): Promise<void>
     });
     const rowBySourceId = new Map(rows.map((row) => [row.sourceCode, row]));
     const embeddedBySourceId = new Map((body.sources ?? []).map((source) => [source.sourceId, source]));
-    const templateContext = createExpressionContext(body.metaData, body.parentParams);
+    const templateContext = createExpressionContext(body.metaData, {
+      ...(body.parentParams ?? {}),
+      ...(body.params ?? {})
+    });
 
     const entries = await Promise.all(body.sourceIds.map(async (sourceId) => {
       const embedded = embeddedBySourceId.get(sourceId);

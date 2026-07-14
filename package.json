@@ -8,6 +8,7 @@
     "dev:server": "pnpm --filter @topo-editor/server dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @topo-editor/topology-shared test && pnpm --filter @topo-editor/server test && pnpm --filter @topo-editor/web test",
     "db:create": "createdb topo_editor || true",
     "db:push": "pnpm --filter @topo-editor/server prisma:push",
     "db:seed": "pnpm --filter @topo-editor/server seed"

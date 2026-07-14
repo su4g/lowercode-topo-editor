@@ -12,6 +12,10 @@ function cleanPorts(value: unknown): NodeTypeDefinition["ports"] {
       id: String(port.id ?? ""),
       label: String(port.label ?? ""),
       direction: port.direction === "in" || port.direction === "out" || port.direction === "both" ? port.direction : "both",
+      side: port.side === "top" || port.side === "right" || port.side === "bottom" || port.side === "left"
+        ? port.side
+        : undefined,
+      positionPercent: typeof port.positionPercent === "number" ? port.positionPercent : undefined,
       maxLinks: typeof port.maxLinks === "number" ? port.maxLinks : undefined,
       linkTypes: Array.isArray(port.linkTypes) ? port.linkTypes.map(String).filter(Boolean) : undefined
     }));
