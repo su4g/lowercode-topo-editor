@@ -19,7 +19,7 @@ const topology: TopologyData = {
   name: "测试拓扑",
   version: "1",
   dataSources: [
-    { sourceId: "api1", name: "接口一", type: "http", enabled: true }
+    { refId: "source-ref-1", sourceId: "api1", name: "接口一", type: "http", enabled: true }
   ],
   nodes: [
     {
@@ -94,6 +94,21 @@ describe("rule condition editor helpers", () => {
       logic: "and",
       conditions: [{ logic: "or", conditions: [{ field: "a", operator: "eq", value: 1 }] }]
     })).toBe(false);
+  });
+
+  it("edits structured references after source codes and identifiers are renamed", () => {
+    const renamed: TopologyData = {
+      ...topology,
+      dataSources: [{ ...topology.dataSources![0], sourceId: "powerApi" }],
+      nodes: [{ ...topology.nodes[0], props: { ...topology.nodes[0].props, identifier: "breakerA" } }]
+    };
+    const draft = parseRuleConditionDraft({
+      field: "api1.data.qf1.status",
+      ref: { kind: "nodeField", nodeKey: "breaker-1", sourceRefId: "source-ref-1", dataPath: "data.qf1", field: "status" },
+      operator: "eq",
+      value: "closed"
+    }, renamed, "breaker-1", false);
+    expect(draft).toMatchObject({ nodeKey: "breaker-1", sourceId: "powerApi", field: "status" });
   });
 
   it("describes and evaluates AND/OR condition groups", () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DEFAULT_TOPOLOGY_CANVAS, expressionFieldWithSource as buildExpressionFieldWithSource, normalizeExpressionPath, type Condition, type ConditionGroup, type ContainerStyle, type DisplayRule, type FormFieldDefinition, type LinkRuntimeRule, type LinkStyle, type NodeLabelPosition, type NodeLabelStyle, type NodeStatusKey, type NodeTypeDefinition, type TopologyCanvasConfig, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { DEFAULT_TOPOLOGY_CANVAS, DEFAULT_TOPOLOGY_TEXT_COLOR, createNodeFieldReference, describeRuleBusiness, expressionFieldWithSource as buildExpressionFieldWithSource, inferRuleFieldReference, normalizeExpressionPath, resolveTopologyTextColor, ruleHealth, type Condition, type ConditionGroup, type ContainerStyle, type DisplayRule, type FormFieldDefinition, type LinkRuntimeRule, type LinkStyle, type NodeLabelPosition, type NodeLabelStyle, type NodeStatusKey, type NodeTypeDefinition, type TopologyCanvasConfig, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { ElMessage } from "element-plus";
 import { computed, reactive, ref, watch } from "vue";
 import { isImageAsset, isOssAssetRef, resolveAssetUrl, uploadImageAsset } from "../../services/assetApi";
@@ -147,7 +147,7 @@ const nodeLabelPositionOptions: Array<{ label: string; value: NodeLabelPosition 
   { label: "左", value: "left" }
 ];
 const DEFAULT_NODE_LABEL_STYLE = {
-  color: "#111827",
+  color: DEFAULT_TOPOLOGY_TEXT_COLOR,
   fontSize: 13,
   fontWeight: "600",
   fontStyle: "normal" as const,
@@ -379,9 +379,7 @@ function nodeTextTemplate(node: TopologyNode) {
 }
 
 function nodeTextColor(node: TopologyNode) {
-  const color = node.props?.textColor;
-  if (typeof color === "string" && color.trim()) return color;
-  return selectedNodeType.value?.annotationDefaults?.textColor ?? "#111827";
+  return resolveTopologyTextColor(node.props?.textColor, selectedNodeType.value?.annotationDefaults?.textColor);
 }
 
 function nodeTextSize(node: TopologyNode) {
@@ -620,7 +618,7 @@ function updateNodeLabelOffset(axis: "x" | "y", raw: string) {
 
 function nodeLabelStyleColor(node: TopologyNode) {
   const color = node.labelStyle?.color;
-  return typeof color === "string" && color.trim() ? color : DEFAULT_NODE_LABEL_STYLE.color;
+  return resolveTopologyTextColor(color, DEFAULT_NODE_LABEL_STYLE.color);
 }
 
 function nodeLabelStyleFontSize(node: TopologyNode) {
@@ -1242,6 +1240,7 @@ function buildConditionGroup(drafts: RuleConditionDraft[], logic: RuleConditionL
       }
       conditions.push({
         field,
+        ref: { kind: "metadata", field, legacyExpression: field },
         operator: "eq",
         value: normalizeDraftValue(draft)
       });
@@ -1270,8 +1269,12 @@ function buildConditionGroup(drafts: RuleConditionDraft[], logic: RuleConditionL
     const field = draft.preserveRawField
       ? normalizeExpressionPath(rawField)
       : expressionFieldWithSource(node, rawField, sourceId);
+    const ref = draft.preserveRawField
+      ? inferRuleFieldReference(field, props.topology ?? { nodes: [], dataSources: [] }, node.key).ref
+      : createNodeFieldReference(props.topology ?? { nodes: [node], dataSources: [] }, node, sourceId, rawField);
     conditions.push({
       field,
+      ref,
       operator: "eq",
       value: normalizeDraftValue(draft, option)
     });
@@ -1663,11 +1666,15 @@ function removeNodeDisplayRule(ruleId: string) {
 }
 
 function describeRule(rule: LinkRuntimeRule) {
-  return describeConditionGroup(rule.condition);
+  return props.topology ? describeRuleBusiness(rule, props.topology) : describeConditionGroup(rule.condition);
 }
 
 function describeDisplayRule(rule: NonNullable<TopologyNode["displayRules"]>[number]) {
-  return describeConditionGroup(rule.condition);
+  return props.topology ? describeRuleBusiness(rule, props.topology) : describeConditionGroup(rule.condition);
+}
+
+function ruleHealthLevel(rule: DisplayRule | LinkRuntimeRule) {
+  return props.topology ? ruleHealth(rule, props.topology).level : "valid";
 }
 
 function displayRuleDrawer(rule: DisplayRule): ActiveDrawer | null {
@@ -2008,9 +2015,10 @@ watch(
                 <button type="button" @click="openDrawer('containerRule')">新增容器规则</button>
               </div>
               <div v-if="selectedNode.displayRules?.length" class="rule-list">
-                <div v-for="rule in selectedNode.displayRules" :key="rule.id" class="rule-item">
+                <div v-for="rule in selectedNode.displayRules" :key="rule.id" class="rule-item" :class="{ 'is-invalid': ruleHealthLevel(rule) === 'invalid' }">
                   <div>
                     <strong>{{ rule.name }}</strong>
+                    <span v-if="ruleHealthLevel(rule) !== 'valid'" class="rule-health-badge" :class="{ 'is-warning': ruleHealthLevel(rule) === 'warning' }">{{ ruleHealthLevel(rule) === 'invalid' ? '规则失效' : '需确认' }}</span>
                     <span>优先级 {{ rule.priority }}</span>
                     <span>{{ describeDisplayRule(rule) }}</span>
                   </div>
@@ -2316,9 +2324,10 @@ watch(
               </div>
               <button v-if="isSelectedControlNode" type="button" @click="openDrawer('buttonVisibilityRule')">新增按钮显示规则</button>
               <div v-if="selectedNode.displayRules?.length" class="rule-list">
-                <div v-for="rule in selectedNode.displayRules" :key="rule.id" class="rule-item">
+                <div v-for="rule in selectedNode.displayRules" :key="rule.id" class="rule-item" :class="{ 'is-invalid': ruleHealthLevel(rule) === 'invalid' }">
                   <div>
                     <strong>{{ rule.name }}</strong>
+                    <span v-if="ruleHealthLevel(rule) !== 'valid'" class="rule-health-badge" :class="{ 'is-warning': ruleHealthLevel(rule) === 'warning' }">{{ ruleHealthLevel(rule) === 'invalid' ? '规则失效' : '需确认' }}</span>
                     <span>优先级 {{ rule.priority }}</span>
                     <span>{{ describeDisplayRule(rule) }}</span>
                   </div>
@@ -2436,9 +2445,10 @@ watch(
                 <button type="button" @click="addVoltageFaultRule">快捷：电压故障</button>
               </div>
               <div v-if="selectedLink.rules?.length" class="rule-list">
-                <div v-for="rule in selectedLink.rules" :key="rule.id" class="rule-item">
+                <div v-for="rule in selectedLink.rules" :key="rule.id" class="rule-item" :class="{ 'is-invalid': ruleHealthLevel(rule) === 'invalid' }">
                   <div>
                     <strong>{{ rule.name }}</strong>
+                    <span v-if="ruleHealthLevel(rule) !== 'valid'" class="rule-health-badge" :class="{ 'is-warning': ruleHealthLevel(rule) === 'warning' }">{{ ruleHealthLevel(rule) === 'invalid' ? '规则失效' : '需确认' }}</span>
                     <span>优先级 {{ rule.priority }}</span>
                     <span>{{ describeRule(rule) }}</span>
                   </div>
@@ -3372,6 +3382,26 @@ button.tree-item.active {
 .rule-item:hover {
   border-color: var(--el-color-primary-light-5, #7fc8c3);
   box-shadow: 0 2px 8px rgb(15 23 42 / 6%);
+}
+
+.rule-item.is-invalid {
+  background: #fff7f7;
+  border-color: #ef4444;
+  box-shadow: inset 3px 0 #dc2626;
+}
+
+.rule-item .rule-health-badge {
+  display: inline-block;
+  width: fit-content;
+  padding: 2px 6px;
+  color: #991b1b;
+  background: #fee2e2;
+  border-radius: 5px;
+}
+
+.rule-item .rule-health-badge.is-warning {
+  color: #92400e;
+  background: #fef3c7;
 }
 
 .rule-item strong,

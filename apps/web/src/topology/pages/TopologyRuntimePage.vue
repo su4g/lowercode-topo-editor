@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { createExpressionContext, defaultRuntimeSource, findNodeByRuleIdentity, isConditionGroup, nodeIdentifier, nodeRuleIdentityCandidates, normalizeExpressionPath, readExpressionPath, resolveExpressionValue, resolveLinkRuntimeWithTrace, resolveNodeRuntimeWithTrace, resolveTemplateString, type ConditionGroup, type DataSourceReference, type ExpressionContext, type LinkRuntime, type NodeRuntime, type NodeTypeDefinition, type RuleOverviewGroup, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { buildTopologyExpressionContext, createExpressionContext, defaultRuntimeSource, findNodeByRuleIdentity, isConditionGroup, nodeIdentifier, nodeRuleIdentityCandidates, normalizeExpressionPath, readExpressionPath, resolveExpressionValue, resolveLinkRuntimeWithTrace, resolveNodeRuntimeWithTrace, resolveTemplateString, type ConditionGroup, type DataSourceReference, type ExpressionContext, type LinkRuntime, type NodeRuntime, type NodeTypeDefinition, type RuleOverviewGroup, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { ElMessage } from "element-plus";
 import { ArrowLeft, Connection, Edit, Refresh, Tickets } from "@element-plus/icons-vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
@@ -470,49 +470,7 @@ function exposeSourceFieldAliases(context: ExpressionContext, sourceId: string, 
 }
 
 function buildRuntimeContext(data: TopologyData, runtime: Record<string, unknown>, metaData: Record<string, unknown>): ExpressionContext {
-  const context: ExpressionContext = {
-    ...createExpressionContext(metaData),
-    runtimeData: runtime,
-    ...runtime
-  };
-  const defaultSource = defaultRuntimeSource(data);
-
-  for (const source of data.dataSources ?? []) {
-    const sourceData = runtime[source.sourceId];
-    if (isRecord(sourceData)) {
-      exposeSourceFieldAliases(context, source.sourceId, sourceData, defaultSource?.sourceId === source.sourceId);
-      exposeSourceNodeAliases(context, source.sourceId, sourceData, data.nodes);
-    }
-  }
-  const defaultSourceData = defaultSource ? runtime[defaultSource.sourceId] as Record<string, unknown> | undefined : undefined;
-
-  for (const node of data.nodes) {
-    const sourceId = node.dataBinding?.sourceId;
-    if (!sourceId) {
-      if (isRecord(defaultSourceData)) exposeNodeFieldsFromRecord(context, node, defaultSourceData);
-      continue;
-    }
-    const sourceData = runtime[sourceId] as Record<string, unknown> | undefined;
-    if (!sourceData) continue;
-
-    for (const [field, value] of Object.entries(sourceData)) {
-      context[`${sourceId}.${field}`] = value;
-      context[`${node.key}.${field}`] = value;
-    }
-
-    for (const [alias, path] of Object.entries(node.dataBinding?.mappings ?? {})) {
-      context[`${node.key}.${alias}`] = readExpressionPath(sourceData, path);
-    }
-  }
-
-  if (defaultSource && isRecord(defaultSourceData)) {
-    for (const key of ["status", "state"]) {
-      const value = readExpressionPath(defaultSourceData, key);
-      if (value !== undefined) context[key] = value;
-    }
-  }
-
-  return context;
+  return buildTopologyExpressionContext(data, runtime, metaData);
 }
 
 function buildDefaultLinkRuntime(link: TopologyLink): LinkRuntime {
@@ -553,11 +511,11 @@ function buildRuleCleanNodeRuntime(node: TopologyNode, text?: string): NodeRunti
 }
 
 function resolveLinkRuntime(link: TopologyLink, context: ExpressionContext): LinkRuntime {
-  return resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link)).runtime;
+  return resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link), currentTemplateTopology() ?? undefined).runtime;
 }
 
 function resolveNodeRuntime(node: TopologyNode, context: ExpressionContext, text?: string): NodeRuntime {
-  return resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node, text)).runtime;
+  return resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node, text), currentTemplateTopology() ?? undefined).runtime;
 }
 
 // 规则总览使用与画布完全一致的求值上下文，随运行快照变化自动刷新
@@ -572,6 +530,7 @@ function countEvaluations(evaluations: RuleOverviewGroup["evaluations"]) {
     active: evaluations.filter((item) => item.status === "active").length,
     overridden: evaluations.filter((item) => item.status === "overridden").length,
     inactive: evaluations.filter((item) => item.status === "inactive").length,
+    invalid: evaluations.filter((item) => item.status === "invalid").length,
     total: evaluations.length
   };
 }
@@ -583,7 +542,7 @@ const ruleOverview = computed<{ nodes: RuleOverviewGroup[]; links: RuleOverviewG
   const context = runtimeEvalContext.value;
 
   const nodes = base.nodes.map((node) => {
-    const { runtime, evaluations } = resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node));
+    const { runtime, evaluations } = resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node), base);
     return {
       kind: "node" as const,
       key: node.key,
@@ -597,7 +556,7 @@ const ruleOverview = computed<{ nodes: RuleOverviewGroup[]; links: RuleOverviewG
   });
 
   const links = base.links.map((link) => {
-    const { runtime, evaluations } = resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link));
+    const { runtime, evaluations } = resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link), base);
     return {
       kind: "link" as const,
       key: link.key,
@@ -840,7 +799,7 @@ function handleVisibilityChange() {
 }
 
 onMounted(async () => {
-  const id = typeof route.query.id === "string" && route.query.id ? route.query.id : "";
+  const id = typeof route.params.id === "string" && route.params.id ? route.params.id : "";
   if (!id) {
     ElMessage.warning("缺少拓扑 ID");
     return;
@@ -913,7 +872,7 @@ onBeforeUnmount(() => {
   <main class="app-shell" :style="isDebugRuntime && ruleOverviewOpen ? { gridTemplateRows: '48px minmax(0, 1fr) min(340px, 42vh)' } : undefined">
     <header class="topbar">
       <el-tooltip v-if="!isPreview" content="返回调试运行列表" placement="bottom" :show-after="300">
-        <el-button text class="topbar-back" :icon="ArrowLeft" @click="router.push('/topology/runtime')" />
+        <el-button text class="topbar-back" :icon="ArrowLeft" @click="router.push('/runtime-list')" />
       </el-tooltip>
       <div class="topbar-heading">
         <span class="topbar-title">拓扑调试运行页</span>
@@ -931,7 +890,7 @@ onBeforeUnmount(() => {
       />
       <el-button v-if="isDebugRuntime" text :icon="Tickets" :disabled="!topology" :type="ruleOverviewOpen ? 'primary' : undefined" @click="ruleOverviewOpen = !ruleOverviewOpen">规则总览</el-button>
       <el-button v-if="isDebugRuntime" text :icon="Connection" :disabled="!topology" @click="openPreviewApiDialog">接口调试</el-button>
-      <el-button text :icon="Edit" :disabled="!topology" @click="router.push(`/topology/list?id=${encodeURIComponent(topology?.id ?? '')}`)">编辑</el-button>
+      <el-button text :icon="Edit" :disabled="!topology" @click="router.push(`/topologies/${encodeURIComponent(topology?.id ?? '')}/editor`)">编辑</el-button>
       <el-button type="primary" :icon="Refresh" @click="safeRefreshRuntime(true)">刷新数据</el-button>
     </header>
     <section

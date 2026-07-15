@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { DEFAULT_TOPOLOGY_CANVAS, type ContainerStyle, type DataSourceReference, type DataSourceType, type LinkStyle, type NodeTypeDefinition, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
-import { ElMessage } from "element-plus";
-import { ArrowLeft, Connection, Delete, Download, FullScreen, List, QuestionFilled, RefreshLeft, RefreshRight, VideoPlay } from "@element-plus/icons-vue";
+import { buildTopologyExpressionContext, createSourceRefId, DEFAULT_TOPOLOGY_CANVAS, migrateTopologyRulesV2, resolveLinkRuntimeWithTrace, resolveNodeRuntimeWithTrace, resolveTopologyTextColor, type ContainerStyle, type DataSourceReference, type DataSourceType, type LinkStyle, type NodeRuntime, type NodeTypeDefinition, type RuleOverviewGroup, type TopologyData, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { ArrowLeft, Connection, Delete, Download, FullScreen, List, QuestionFilled, RefreshLeft, RefreshRight, Tickets, VideoPlay } from "@element-plus/icons-vue";
 import { computed, nextTick, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import JsonTextEditor from "../components/JsonTextEditor.vue";
 import ObjectNavigator from "../components/ObjectNavigator/index.vue";
 import PalettePanel from "../components/PalettePanel/index.vue";
 import PropertyPanel from "../components/PropertyPanel/index.vue";
+import RuleOverviewPanel from "../components/RuleOverviewPanel/index.vue";
 import TopologyCanvas from "../components/TopologyCanvas/index.vue";
 import { listEnabledNodeTypes } from "../services/nodeTypeApi";
 import { normalizeTopologyCanvas } from "../services/adapters";
@@ -21,6 +22,7 @@ const saving = ref(false);
 const selectedKey = ref("");
 const apiDialogVisible = ref(false);
 const objectNavigatorVisible = ref(false);
+const ruleOverviewOpen = ref(false);
 const initialLoading = ref(false);
 const loadProgress = ref(0);
 const loadStage = ref("");
@@ -89,6 +91,7 @@ const selectedLink = computed(() => topology.value?.links.find((link) => link.ke
 
 function createEmptyTopology(id: string): TopologyData {
   return {
+    schemaVersion: 2,
     id,
     name: "新建拓扑",
     version: "1.0.0",
@@ -126,7 +129,7 @@ function nodeTypeDefaultProps(nodeType: NodeTypeDefinition) {
   const props: Record<string, unknown> = formSchemaDefaultProps(nodeType);
 
   if (nodeType.category === "annotation") {
-    props.textColor = nodeType.annotationDefaults?.textColor ?? props.textColor ?? "#111827";
+    props.textColor = resolveTopologyTextColor(nodeType.annotationDefaults?.textColor, props.textColor);
     props.textSize = nodeType.annotationDefaults?.textSize ?? props.textSize ?? 14;
     props.fontWeight = nodeType.annotationDefaults?.fontWeight ?? props.fontWeight ?? "400";
     props.fontStyle = nodeType.annotationDefaults?.fontStyle ?? props.fontStyle ?? "normal";
@@ -193,6 +196,7 @@ function normalizeNodeSizes(data: TopologyData) {
 function createDataSource(): DataSourceReference {
   const index = (topology.value?.dataSources?.length ?? 0) + 1;
   return {
+    refId: createSourceRefId(`source_${index}`, index),
     sourceId: `source_${String(index).padStart(3, "0")}`,
     name: `接口 ${index}`,
     type: "http",
@@ -216,6 +220,18 @@ function createDataSource(): DataSourceReference {
       responseMapping: {}
     }
   };
+}
+
+function updateDataSourceId(index: number, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const sourceId = input.value.trim();
+  const previous = topology.value?.dataSources?.[index]?.sourceId ?? "";
+  if (!sourceId || topology.value?.dataSources?.some((source, sourceIndex) => sourceIndex !== index && source.sourceId === sourceId)) {
+    input.value = previous;
+    ElMessage.error(!sourceId ? "接口编码不能为空" : `接口编码「${sourceId}」已被使用`);
+    return;
+  }
+  updateDataSource(index, { sourceId });
 }
 
 function updateDataSource(index: number, patch: Partial<DataSourceReference>) {
@@ -405,11 +421,55 @@ function clearContainerStylePreview(nodeKey?: string) {
   canvasRef.value?.clearContainerStylePreview(nodeKey);
 }
 
+function ruleCounts(evaluations: RuleOverviewGroup["evaluations"]) {
+  return {
+    active: evaluations.filter((item) => item.status === "active").length,
+    overridden: evaluations.filter((item) => item.status === "overridden").length,
+    inactive: evaluations.filter((item) => item.status === "inactive").length,
+    invalid: evaluations.filter((item) => item.status === "invalid").length,
+    total: evaluations.length
+  };
+}
+
+const editorRuleOverview = computed<{ nodes: RuleOverviewGroup[]; links: RuleOverviewGroup[] }>(() => {
+  const data = topology.value;
+  if (!data) return { nodes: [], links: [] };
+  const tested = (data.dataSources ?? []).some((source) => source.config?.mockData !== undefined || source.config?.data !== undefined);
+  const runtime = Object.fromEntries((data.dataSources ?? []).map((source) => [source.sourceId, source.config?.mockData ?? source.config?.data ?? {}]));
+  const context = buildTopologyExpressionContext(data, runtime);
+  const nodes = data.nodes.map((node) => {
+    const { runtime: result, evaluations } = resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, node.runtime ?? {}, data);
+    return { kind: "node" as const, key: node.key, label: node.label || node.key, typeName: node.isGroup ? "分组" : nodeTypes.value.find((item) => item.id === node.typeId)?.name ?? node.typeId, statusText: tested ? (result as NodeRuntime & { state?: string }).status ?? (result as NodeRuntime & { state?: string }).state ?? "默认" : "未调试", visible: result.visible !== false, tested, evaluations, counts: ruleCounts(evaluations) };
+  });
+  const links = data.links.map((link) => {
+    const { runtime: result, evaluations } = resolveLinkRuntimeWithTrace(link.rules ?? [], context, link.runtime ?? { state: link.defaultState ?? "off" }, data);
+    const from = data.nodes.find((node) => node.key === link.from)?.label ?? link.from;
+    const to = data.nodes.find((node) => node.key === link.to)?.label ?? link.to;
+    return { kind: "link" as const, key: link.key, label: link.label || `${from} → ${to}`, typeName: "连线", statusText: tested ? result.state ?? "默认" : "未调试", visible: result.visible !== false, tested, evaluations, counts: ruleCounts(evaluations) };
+  });
+  return { nodes, links };
+});
+
+const invalidRuleCount = computed(() => [...editorRuleOverview.value.nodes, ...editorRuleOverview.value.links].reduce((count, group) => count + group.counts.invalid, 0));
+
+async function deleteRuleFromOverview(kind: "node" | "link", ownerKey: string, ruleId: string) {
+  const group = [...editorRuleOverview.value.nodes, ...editorRuleOverview.value.links].find((item) => item.key === ownerKey);
+  const evaluation = group?.evaluations.find((item) => item.ruleId === ruleId);
+  try { await ElMessageBox.confirm(`确认删除规则“${evaluation?.description || evaluation?.name || ruleId}”吗？`, "删除规则", { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }); } catch { return; }
+  if (kind === "node") {
+    const owner = topology.value?.nodes.find((node) => node.key === ownerKey);
+    if (owner) updateNode(ownerKey, { displayRules: (owner.displayRules ?? []).filter((rule) => rule.id !== ruleId) });
+  } else {
+    const owner = topology.value?.links.find((link) => link.key === ownerKey);
+    if (owner) updateLink(ownerKey, { rules: (owner.rules ?? []).filter((rule) => rule.id !== ruleId) });
+  }
+}
+
 async function save() {
   if (!topology.value) return;
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   await nextTick();
-  const latestTopology = canvasRef.value?.exportTopology() ?? topology.value;
+  const latestTopology = migrateTopologyRulesV2(canvasRef.value?.exportTopology() ?? topology.value);
   topology.value = latestTopology;
   saving.value = true;
   try {
@@ -424,12 +484,12 @@ async function previewRuntime() {
   if (!topology.value) return;
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   await nextTick();
-  const latestTopology = canvasRef.value?.exportTopology() ?? topology.value;
+  const latestTopology = migrateTopologyRulesV2(canvasRef.value?.exportTopology() ?? topology.value);
   topology.value = latestTopology;
   const previewPayload = JSON.stringify(latestTopology);
   sessionStorage.setItem(`topology-preview:${latestTopology.id}`, previewPayload);
   sessionStorage.setItem("topology-preview:last", previewPayload);
-  router.push(`/topology/runtime?id=${encodeURIComponent(latestTopology.id)}&preview=1`);
+  router.push(`/runtime/${encodeURIComponent(latestTopology.id)}?preview=1`);
 }
 
 function undo() {
@@ -464,7 +524,7 @@ onMounted(async () => {
   loadStage.value = "加载节点类型与拓扑数据";
   loadProgress.value = 10;
   try {
-    const id = typeof route.query.id === "string" && route.query.id ? route.query.id : "topology_001";
+    const id = typeof route.params.id === "string" && route.params.id ? route.params.id : "topology_001";
     const [types, data] = await Promise.all([listEnabledNodeTypes(), getTopology(id)]);
     nodeTypes.value = types;
 
@@ -484,10 +544,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="app-shell">
+  <main class="app-shell" :style="ruleOverviewOpen ? { gridTemplateRows: '48px minmax(0, 1fr) min(340px, 42vh)' } : undefined">
     <header class="topbar">
       <el-tooltip content="返回列表" placement="bottom" :show-after="300">
-        <el-button text class="topbar-back" :icon="ArrowLeft" @click="router.push('/topology/list')" />
+        <el-button text class="topbar-back" :icon="ArrowLeft" @click="router.push('/topologies')" />
       </el-tooltip>
       <div class="topbar-heading">
         <span class="topbar-title">拓扑编辑器</span>
@@ -582,6 +642,7 @@ onMounted(async () => {
       <div class="topbar-group">
         <el-button text :icon="List" :type="objectNavigatorVisible ? 'primary' : ''" :disabled="!topology" @click="objectNavigatorVisible = !objectNavigatorVisible">对象树</el-button>
         <el-button text :icon="Connection" :disabled="!topology" @click="apiDialogVisible = true">接口配置</el-button>
+        <el-button text :icon="Tickets" :type="ruleOverviewOpen ? 'primary' : ''" :disabled="!topology" @click="ruleOverviewOpen = !ruleOverviewOpen">规则总览<span v-if="invalidRuleCount" class="invalid-rule-count">{{ invalidRuleCount }}</span></el-button>
         <el-tooltip content="导出 SVG" placement="bottom" :show-after="300">
           <el-button text :disabled="!topology" :icon="Download" @click="exportSvg" />
         </el-tooltip>
@@ -631,6 +692,17 @@ onMounted(async () => {
         @clear-container-style-preview="clearContainerStylePreview"
       />
     </section>
+    <RuleOverviewPanel
+      v-if="ruleOverviewOpen"
+      :node-groups="editorRuleOverview.nodes"
+      :link-groups="editorRuleOverview.links"
+      :selected-key="selectedKey"
+      editor-mode
+      @select="selectedKey = $event"
+      @focus-rule="selectedKey = $event"
+      @delete-rule="deleteRuleFromOverview"
+      @close="ruleOverviewOpen = false"
+    />
     <el-dialog v-model="apiDialogVisible" title="拓扑接口配置" width="980px" class="api-config-dialog">
       <div class="api-config-header">
         <div>
@@ -650,7 +722,7 @@ onMounted(async () => {
               接口编码
               <input
                 :value="source.sourceId"
-                @input="updateDataSource(index, { sourceId: ($event.target as HTMLInputElement).value })"
+                @change="updateDataSourceId(index, $event)"
               />
             </label>
             <label>
@@ -995,6 +1067,21 @@ onMounted(async () => {
   color: #4b5563;
   font-size: 13px;
   text-align: center;
+}
+
+.invalid-rule-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 5px;
+  color: #fff;
+  background: #dc2626;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .api-config-header {

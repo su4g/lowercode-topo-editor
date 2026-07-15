@@ -117,7 +117,10 @@ function removeCondition(index: number) {
 <template>
   <section class="condition-editor">
     <div class="condition-editor-header">
-      <strong>触发条件</strong>
+      <div>
+        <div class="condition-editor-title">触发条件</div>
+        <div class="condition-editor-note">配置规则生效前需要满足的数据条件</div>
+      </div>
       <label class="logic-field">
         条件关系
         <select :value="logic" @change="emit('update:logic', ($event.target as HTMLSelectElement).value as RuleConditionLogic)">
@@ -129,8 +132,8 @@ function removeCondition(index: number) {
 
     <div v-for="(draft, index) in modelValue" :key="draft.id" class="condition-card">
       <div class="condition-card-header">
-        <strong>条件 {{ index + 1 }}</strong>
-        <button type="button" :disabled="modelValue.length <= 1" @click="removeCondition(index)">删除</button>
+        <strong><span class="condition-index">{{ index + 1 }}</span>条件 {{ index + 1 }}</strong>
+        <button class="condition-delete" type="button" :disabled="modelValue.length <= 1" @click="removeCondition(index)">删除</button>
       </div>
 
       <label v-if="allowMetaData">
@@ -216,14 +219,18 @@ function removeCondition(index: number) {
       </label>
     </div>
 
-    <button type="button" @click="addCondition">新增条件</button>
+    <button class="condition-add" type="button" @click="addCondition">+ 新增条件</button>
   </section>
 </template>
 
 <style scoped>
 .condition-editor {
   display: grid;
-  gap: 10px;
+  gap: 12px;
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 10px;
 }
 
 .condition-editor-header,
@@ -234,18 +241,32 @@ function removeCondition(index: number) {
   gap: 10px;
 }
 
+.condition-editor-header {
+  align-items: flex-start;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5);
+}
+
+.condition-editor-title { color: var(--el-text-color-primary, #303133); font-size: 14px; font-weight: 700; }
+.condition-editor-note { margin-top: 3px; color: var(--el-text-color-secondary, #909399); font-size: 12px; }
+
 .logic-field {
-  min-width: 168px;
+  width: 172px;
+  flex: none;
 }
 
 .condition-card {
   display: grid;
   gap: 9px;
-  padding: 10px;
-  background: var(--el-fill-color-lighter, #fafafa);
+  padding: 12px;
+  background: var(--el-fill-color-extra-light, #fafcff);
   border: 1px solid var(--el-border-color-lighter, #ebeef5);
   border-radius: 8px;
 }
+
+.condition-card-header { padding-bottom: 8px; border-bottom: 1px solid var(--el-border-color-lighter, #ebeef5); }
+.condition-card-header strong { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
+.condition-index { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; color: var(--el-color-primary, #009688); background: var(--el-color-primary-light-9, #e6f4f3); border-radius: 50%; font-size: 11px; }
 
 .condition-node-cascader {
   width: 100%;
@@ -281,4 +302,7 @@ button:disabled {
   color: var(--el-text-color-placeholder, #a8abb2);
   cursor: not-allowed;
 }
+
+.condition-delete:not(:disabled) { color: var(--el-color-danger, #f56c6c); }
+.condition-add { color: var(--el-color-primary, #009688); background: var(--el-color-primary-light-9, #e6f4f3); border-style: dashed; border-color: var(--el-color-primary-light-7, #b3ded9); }
 </style>

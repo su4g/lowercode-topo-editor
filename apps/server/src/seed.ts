@@ -50,7 +50,7 @@ const nodeTypes: NodeTypeDefinition[] = [
     defaultSize: { width: 140, height: 64 },
     ports: defaultNodePorts,
     annotationDefaults: {
-      textColor: "#111827",
+      textColor: "#fff",
       textSize: 14
     },
     formSchema: [
@@ -126,6 +126,7 @@ const dataSources: DataSource[] = [
 ];
 
 const topology: TopologyData = {
+  schemaVersion: 2,
   id: "topology_001",
   name: "实验室配电拓扑",
   version: "1.0.0",

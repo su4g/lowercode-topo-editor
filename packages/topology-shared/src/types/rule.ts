@@ -1,9 +1,34 @@
+export type RuleFieldReferenceKind = "nodeField" | "virtualPoint" | "metadata" | "raw";
+
+/** Stable rule reference. User-editable names are snapshots; runtime lookup uses stable keys. */
+export type RuleFieldReference = {
+  kind: RuleFieldReferenceKind;
+  nodeKey?: string;
+  sourceRefId?: string;
+  dataPath?: string;
+  deviceId?: number;
+  pointId?: number;
+  field: string;
+  snapshots?: {
+    nodeLabel?: string;
+    sourceName?: string;
+    deviceName?: string;
+    pointName?: string;
+  };
+  legacyExpression?: string;
+  migrationIssue?: "ambiguous" | "unresolved";
+};
+
 export type ConditionGroup = {
   logic?: "and" | "or";
   conditions: Array<Condition | ConditionGroup>;
 };
 export type Condition = {
+  id?: string;
   field: string;
+  /** Structured V2 reference; field remains as a backward-compatible snapshot. */
+  ref?: RuleFieldReference;
+  legacyField?: string;
   operator: "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "in" | "notIn" | "exists" | "empty";
   value?: unknown;
 };
@@ -38,6 +63,7 @@ export type LinkRuntimeRule = {
   trigger: {
     type: "dataChange" | "nodeStateChange" | "manual" | "timer";
     sources?: string[];
+    sourceRefs?: RuleFieldReference[];
   };
   condition: ConditionGroup;
   action: {

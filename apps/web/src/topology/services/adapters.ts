@@ -1,5 +1,6 @@
 import {
   DEFAULT_TOPOLOGY_CANVAS,
+  migrateTopologyRulesV2,
   type TopologyCanvasConfig,
   type TopologyData
 } from "@topo-editor/topology-shared";
@@ -17,11 +18,11 @@ export function normalizeTopologyCanvas(
 
 export function normalizeTopologyData(data: TopologyData | null): TopologyData | null {
   if (!data) return null;
-  return {
+  return migrateTopologyRulesV2({
     ...data,
     canvas: normalizeTopologyCanvas(data.canvas),
     dataSources: data.dataSources ?? [],
     nodes: data.nodes ?? [],
     links: data.links ?? []
-  };
+  });
 }

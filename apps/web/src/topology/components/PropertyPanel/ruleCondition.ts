@@ -1,5 +1,5 @@
 import type { Condition, ConditionGroup, TopologyData, TopologyNode } from "@topo-editor/topology-shared";
-import { findNodeByRuleIdentity, normalizeExpressionPath } from "@topo-editor/topology-shared";
+import { findNodeByRuleIdentity, materializeRuleField, normalizeExpressionPath, sourceByRef } from "@topo-editor/topology-shared";
 
 export type RuleConditionLogic = "and" | "or";
 export type RuleConditionSourceType = "node" | "metaData";
@@ -161,7 +161,23 @@ export function parseRuleConditionDraft(
   fallbackNodeKey: string,
   allowMetaData: boolean
 ): RuleConditionDraft {
-  const rawField = normalizeExpressionPath(condition.field);
+  if (condition.ref?.kind === "metadata") {
+    return {
+      id: draftId(), sourceType: "metaData", nodeKey: "", sourceId: "", field: "__custom__",
+      customField: condition.ref.field || condition.field,
+      value: condition.value === undefined || condition.value === null ? "" : String(condition.value),
+      valueType: valueTypeOf(condition.value)
+    };
+  }
+  if (condition.ref?.kind === "nodeField" && topology) {
+    const node = topology.nodes.find((item) => item.key === condition.ref?.nodeKey);
+    if (node) {
+      const source = sourceByRef(topology, condition.ref);
+      return draftForNodeField(condition, node, source?.sourceId ?? "", condition.ref.field);
+    }
+  }
+  const resolvedField = materializeRuleField(condition.ref, topology, condition.field);
+  const rawField = normalizeExpressionPath(resolvedField);
   const segments = rawField.split(".").filter(Boolean);
   const sources = (topology?.dataSources ?? []).filter((source) => source.enabled !== false);
   const source = sources.find((item) => item.sourceId === segments[0]);

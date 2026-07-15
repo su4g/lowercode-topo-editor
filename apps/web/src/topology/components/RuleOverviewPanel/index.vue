@@ -7,15 +7,19 @@ const props = defineProps<{
   nodeGroups: RuleOverviewGroup[];
   linkGroups: RuleOverviewGroup[];
   selectedKey: string;
+  editorMode?: boolean;
 }>();
 
 const emit = defineEmits<{
   (event: 'select', key: string): void;
   (event: 'close'): void;
+  (event: 'delete-rule', kind: 'node' | 'link', ownerKey: string, ruleId: string): void;
+  (event: 'focus-rule', ownerKey: string, ruleId: string): void;
 }>();
 
 type Dimension = 'node' | 'link';
-type StatusFilter = 'all' | RuleStatus;
+type DisplayStatus = RuleStatus | 'untested';
+type StatusFilter = 'all' | DisplayStatus;
 
 const rootRef = ref<HTMLElement | null>(null);
 const dimension = ref<Dimension>('node');
@@ -38,10 +42,12 @@ watch(
   }
 );
 
-const statusMeta: Record<RuleStatus, { label: string; short: string }> = {
+const statusMeta: Record<DisplayStatus, { label: string; short: string }> = {
   active: { label: '已生效', short: '生效' },
   overridden: { label: '被覆盖', short: '覆盖' },
-  inactive: { label: '未生效', short: '未生效' }
+  inactive: { label: '未生效', short: '未生效' },
+  invalid: { label: '不可用', short: '失效' },
+  untested: { label: '未调试', short: '未调试' }
 };
 
 const operatorLabel: Record<string, string> = {
@@ -59,11 +65,16 @@ const operatorLabel: Record<string, string> = {
 
 const sourceGroups = computed(() => (dimension.value === 'node' ? props.nodeGroups : props.linkGroups));
 
+function evaluationStatus(group: RuleOverviewGroup, evaluation: RuleEvaluation): DisplayStatus {
+  if (evaluation.status === 'invalid') return 'invalid';
+  return group.tested === false ? 'untested' : evaluation.status;
+}
+
 const filteredGroups = computed(() => {
   const word = keyword.value.trim().toLowerCase();
   return sourceGroups.value
     .map((group) => {
-      const evaluations = statusFilter.value === 'all' ? group.evaluations : group.evaluations.filter((item) => item.status === statusFilter.value);
+      const evaluations = statusFilter.value === 'all' ? group.evaluations : group.evaluations.filter((item) => evaluationStatus(group, item) === statusFilter.value);
       return { ...group, evaluations };
     })
     .filter((group) => {
@@ -80,12 +91,16 @@ const totals = computed(() => {
   const groups = sourceGroups.value;
   return groups.reduce(
     (acc, group) => {
-      acc.active += group.counts.active;
-      acc.overridden += group.counts.overridden;
-      acc.inactive += group.counts.inactive;
+      if (group.tested !== false) {
+        acc.active += group.counts.active;
+        acc.overridden += group.counts.overridden;
+        acc.inactive += group.counts.inactive;
+      }
+      acc.invalid += group.counts.invalid;
+      acc.untested += group.tested === false ? group.evaluations.filter((item) => item.status !== 'invalid').length : 0;
       return acc;
     },
-    { active: 0, overridden: 0, inactive: 0 }
+    { active: 0, overridden: 0, inactive: 0, invalid: 0, untested: 0 }
   );
 });
 
@@ -94,6 +109,7 @@ function ruleRowKey(groupKey: string, evaluation: RuleEvaluation) {
 }
 
 function toggleRule(groupKey: string, evaluation: RuleEvaluation) {
+  emit('focus-rule', groupKey, evaluation.ruleId);
   const id = ruleRowKey(groupKey, evaluation);
   const next = new Set(expandedRules.value);
   if (next.has(id)) next.delete(id);
@@ -113,6 +129,7 @@ function formatValue(value: unknown) {
 }
 
 function describeConditionLeaf(trace: ConditionTrace) {
+  if (trace.description) return trace.description;
   const operator = operatorLabel[trace.operator ?? ''] ?? trace.operator ?? '';
   if (trace.operator === 'exists' || trace.operator === 'empty') {
     return `${trace.field} ${operator}`;
@@ -134,6 +151,8 @@ function isEmptyAction(evaluation: RuleEvaluation) {
           <i class="dot dot-active" />{{ totals.active }} <i class="dot dot-overridden" />{{ totals.overridden }} <i class="dot dot-inactive" />{{
             totals.inactive
           }}
+          <i class="dot dot-invalid" />{{ totals.invalid }}
+          <template v-if="totals.untested"><i class="dot dot-untested" />{{ totals.untested }}</template>
         </span>
       </div>
       <el-segmented
@@ -149,6 +168,8 @@ function isEmptyAction(evaluation: RuleEvaluation) {
         <el-option label="已生效" value="active" />
         <el-option label="被覆盖" value="overridden" />
         <el-option label="未生效" value="inactive" />
+        <el-option label="不可用" value="invalid" />
+        <el-option label="未调试" value="untested" />
       </el-select>
       <el-input v-model="keyword" size="small" class="rule-overview-search" placeholder="搜索对象或规则名" :prefix-icon="Search" clearable />
       <el-checkbox v-model="onlyWithRules" size="small">仅含规则</el-checkbox>
@@ -168,28 +189,36 @@ function isEmptyAction(evaluation: RuleEvaluation) {
             <span class="rule-group-state">当前：{{ group.statusText }}</span>
             <span v-if="!group.visible" class="rule-group-hidden">隐藏</span>
             <span class="rule-group-counts">
-              <em class="tag tag-active" v-if="group.counts.active">{{ group.counts.active }} 生效</em>
-              <em class="tag tag-overridden" v-if="group.counts.overridden">{{ group.counts.overridden }} 覆盖</em>
-              <em class="tag tag-inactive" v-if="group.counts.inactive">{{ group.counts.inactive }} 未生效</em>
+              <em class="tag tag-untested" v-if="group.tested === false && group.evaluations.some((item) => item.status !== 'invalid')">{{ group.evaluations.filter((item) => item.status !== 'invalid').length }} 未调试</em>
+              <template v-else>
+                <em class="tag tag-active" v-if="group.counts.active">{{ group.counts.active }} 生效</em>
+                <em class="tag tag-overridden" v-if="group.counts.overridden">{{ group.counts.overridden }} 覆盖</em>
+                <em class="tag tag-inactive" v-if="group.counts.inactive">{{ group.counts.inactive }} 未生效</em>
+              </template>
+              <em class="tag tag-invalid" v-if="group.counts.invalid">{{ group.counts.invalid }} 失效</em>
               <em class="tag tag-none" v-if="!group.counts.total">无规则</em>
             </span>
           </div>
         </div>
 
         <ul v-if="group.evaluations.length" class="rule-list">
-          <li v-for="evaluation in group.evaluations" :key="evaluation.ruleId" class="rule-item" :class="`rule-item-${evaluation.status}`">
+          <li v-for="evaluation in group.evaluations" :key="evaluation.ruleId" class="rule-item" :class="`rule-item-${evaluationStatus(group, evaluation)}`">
             <button type="button" class="rule-item-head" @click="toggleRule(group.key, evaluation)">
-              <span class="rule-status" :class="`rule-status-${evaluation.status}`">{{ statusMeta[evaluation.status].short }}</span>
+              <span class="rule-status" :class="`rule-status-${evaluationStatus(group, evaluation)}`">{{ statusMeta[evaluationStatus(group, evaluation)].short }}</span>
               <span class="rule-priority">P{{ evaluation.priority }}</span>
-              <span class="rule-name">{{ evaluation.name || evaluation.ruleId }}</span>
+              <span class="rule-name">{{ evaluation.description || evaluation.name || evaluation.ruleId }}</span>
               <span class="rule-fields">
                 <em v-for="field in evaluation.effectiveFields" :key="`e-${field}`" class="field field-active">{{ field }}</em>
                 <em v-for="field in evaluation.overriddenFields" :key="`o-${field}`" class="field field-overridden">{{ field }}</em>
                 <em v-if="isEmptyAction(evaluation)" class="field field-none">空动作</em>
               </span>
               <el-icon class="rule-caret" :class="{ 'is-open': isExpanded(group.key, evaluation) }"><ArrowDown /></el-icon>
+              <el-button v-if="editorMode" text type="danger" size="small" @click.stop="emit('delete-rule', group.kind, group.key, evaluation.ruleId)">删除</el-button>
             </button>
             <div v-if="isExpanded(group.key, evaluation)" class="rule-conditions">
+              <div v-if="evaluation.health.issues.length" class="rule-health-issues">
+                <div v-for="issue in evaluation.health.issues" :key="`${issue.code}-${issue.message}`">{{ issue.message }}</div>
+              </div>
               <div v-if="!evaluation.conditions.length" class="rule-conditions-empty">无条件（恒成立）</div>
               <template v-else>
                 <div
@@ -279,6 +308,12 @@ function isEmptyAction(evaluation: RuleEvaluation) {
 }
 .dot-inactive {
   background: #94a3b8;
+}
+.dot-invalid {
+  background: #dc2626;
+}
+.dot-untested {
+  background: #6366f1;
 }
 
 .rule-overview-status {
@@ -393,6 +428,14 @@ function isEmptyAction(evaluation: RuleEvaluation) {
   color: #475569;
   background: #e2e8f0;
 }
+.tag-invalid {
+  color: #991b1b;
+  background: #fee2e2;
+}
+.tag-untested {
+  color: #3730a3;
+  background: #e0e7ff;
+}
 .tag-none {
   color: #94a3b8;
   background: #f1f5f9;
@@ -445,6 +488,22 @@ function isEmptyAction(evaluation: RuleEvaluation) {
 .rule-status-inactive {
   color: #64748b;
   background: #e2e8f0;
+}
+.rule-status-invalid {
+  color: #991b1b;
+  background: #fee2e2;
+}
+.rule-status-untested {
+  color: #3730a3;
+  background: #e0e7ff;
+}
+
+.rule-health-issues {
+  padding: 8px 12px;
+  color: #991b1b;
+  background: #fff7f7;
+  border-bottom: 1px solid #fecaca;
+  font-size: 12px;
 }
 
 .rule-priority {

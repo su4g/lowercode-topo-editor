@@ -82,11 +82,13 @@ export const topologyLinkSchema = z.object({
 });
 
 export const topologyDataSchema = z.object({
+  schemaVersion: z.number().int().positive().optional(),
   id: z.string().min(1),
   name: z.string().min(1),
   version: z.string().min(1),
   nodeTypesVersion: z.string().optional(),
   dataSources: z.array(z.object({
+    refId: z.string().optional(),
     sourceId: z.string(),
     name: z.string().optional(),
     type: z.enum(["http", "websocket", "mqtt", "static"]).optional(),

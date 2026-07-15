@@ -1,5 +1,6 @@
 import type { TopologyData } from "@topo-editor/topology-shared";
 import { request } from "./http";
+import { normalizeTopologyData } from "./adapters";
 
 export type TopologySummary = {
   id: string;
@@ -13,22 +14,26 @@ export function listTopologies(): Promise<TopologySummary[]> {
   return request<TopologySummary[]>("/api/topologies");
 }
 
-export function getTopology(id: string): Promise<TopologyData | null> {
-  return request<TopologyData | null>(`/api/topologies/${id}`);
+export async function getTopology(id: string): Promise<TopologyData | null> {
+  return normalizeTopologyData(await request<TopologyData | null>(`/api/topologies/${id}`));
 }
 
-export function createTopology(topology: TopologyData): Promise<TopologyData> {
-  return request<TopologyData>("/api/topologies", {
+export async function createTopology(topology: TopologyData): Promise<TopologyData> {
+  const normalized = normalizeTopologyData(topology) ?? topology;
+  const result = await request<TopologyData>("/api/topologies", {
     method: "POST",
-    body: JSON.stringify(topology)
+    body: JSON.stringify(normalized)
   });
+  return normalizeTopologyData(result) ?? result;
 }
 
-export function saveTopology(topology: TopologyData): Promise<TopologyData> {
-  return request<TopologyData>(`/api/topologies/${topology.id}`, {
+export async function saveTopology(topology: TopologyData): Promise<TopologyData> {
+  const normalized = normalizeTopologyData(topology) ?? topology;
+  const result = await request<TopologyData>(`/api/topologies/${topology.id}`, {
     method: "PUT",
-    body: JSON.stringify(topology)
+    body: JSON.stringify(normalized)
   });
+  return normalizeTopologyData(result) ?? result;
 }
 
 export function deleteTopology(id: string): Promise<{ id: string }> {

@@ -7,6 +7,8 @@ describe("topologyDataSchema", () => {
       id: "demo",
       name: "独立拓扑",
       version: "1.0.0",
+      schemaVersion: 2,
+      dataSources: [{ refId: "source-ref-1", sourceId: "latest" }],
       canvas: { width: 1920, height: 1080 },
       nodes: [{
         key: "n1",
@@ -20,6 +22,8 @@ describe("topologyDataSchema", () => {
     });
 
     expect(parsed.canvas).toEqual({ width: 1920, height: 1080 });
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed.dataSources?.[0]?.refId).toBe("source-ref-1");
     expect(parsed.nodes[0]?.labelOffset).toEqual({ x: 8, y: 4 });
     expect(parsed.nodes[0]).not.toHaveProperty("virtualBinding");
   });

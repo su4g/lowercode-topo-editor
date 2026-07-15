@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // @ts-nocheck
 import "../../../core/go.js";
-import { DEFAULT_TOPOLOGY_CANVAS, defaultNodePorts, nodeMatchesRuleIdentity, nodeRuleIdentity, nodeRuleIdentityCandidates, normalizeExpressionPath, normalizePortDefinition, portAlignmentFraction, readExpressionPath, resolveExpressionValue, VISUAL_PORT_ID_PREFIX, type ContainerStyle, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeLabelStyle, type NodeTypeDefinition, type PortDefinition, type PortSide, type TopologyCanvasConfig, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
+import { DEFAULT_TOPOLOGY_CANVAS, DEFAULT_TOPOLOGY_TEXT_COLOR, defaultNodePorts, nodeMatchesRuleIdentity, nodeRuleIdentity, nodeRuleIdentityCandidates, normalizeExpressionPath, normalizePortDefinition, portAlignmentFraction, readExpressionPath, resolveExpressionValue, resolveTopologyTextColor, VISUAL_PORT_ID_PREFIX, type ContainerStyle, type LinkStyle, type NodeEventConfig, type NodeLabelPosition, type NodeLabelStyle, type NodeTypeDefinition, type PortDefinition, type PortSide, type TopologyCanvasConfig, type TopologyData, type TopologyEvent, type TopologyLink, type TopologyNode } from "@topo-editor/topology-shared";
 import { isImageAsset, isOssAssetRef, resolveAssetUrl } from "../../services/assetApi";
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 
@@ -486,7 +486,7 @@ function resolveIconText(node: TopologyNode, icon: string) {
 }
 
 const DEFAULT_NODE_LABEL_STYLE = {
-  color: "#111827",
+  color: DEFAULT_TOPOLOGY_TEXT_COLOR,
   fontSize: 13,
   fontWeight: "600",
   fontStyle: "normal" as const,
@@ -500,7 +500,7 @@ function resolveNodeLabelStyle(node: DiagramNodeData): NodeLabelStyle {
 
 function resolveNodeLabelColor(node: DiagramNodeData) {
   const color = resolveNodeLabelStyle(node).color;
-  return typeof color === "string" && color.trim() ? color : DEFAULT_NODE_LABEL_STYLE.color;
+  return resolveTopologyTextColor(color, DEFAULT_NODE_LABEL_STYLE.color);
 }
 
 function resolveNodeLabelFontSize(node: DiagramNodeData) {
@@ -558,9 +558,7 @@ function resolveAnnotationText(node: DiagramNodeData) {
 }
 
 function resolveAnnotationTextColor(node: DiagramNodeData) {
-  const color = node.props?.textColor;
-  if (typeof color === "string" && color.trim()) return color;
-  return nodeTypeOf(node.typeId)?.annotationDefaults?.textColor ?? "#111827";
+  return resolveTopologyTextColor(node.props?.textColor, nodeTypeOf(node.typeId)?.annotationDefaults?.textColor);
 }
 
 function resolveAnnotationTextSize(node: DiagramNodeData) {
@@ -3290,7 +3288,7 @@ function createDiagram(el: HTMLDivElement) {
               margin: 8,
               font: "14px sans-serif",
               overflow: go.TextBlock.OverflowClip,
-              stroke: "#111827",
+              stroke: DEFAULT_TOPOLOGY_TEXT_COLOR,
               textAlign: "left",
               verticalAlignment: go.Spot.Center,
               wrap: go.TextBlock.WrapFit
@@ -3325,7 +3323,7 @@ function createDiagram(el: HTMLDivElement) {
           {
             margin: new go.Margin(0, 4, 0, 4),
             font: "600 13px sans-serif",
-            stroke: "#111827",
+            stroke: DEFAULT_TOPOLOGY_TEXT_COLOR,
             background: "transparent",
             textAlign: "center",
             maxLines: 1,

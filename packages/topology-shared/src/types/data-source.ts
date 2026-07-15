@@ -31,6 +31,8 @@ export type DataSource = {
 };
 
 export type DataSourceReference = {
+  /** Stable identity that is not changed when sourceId is renamed. */
+  refId?: string;
   sourceId: string;
   name?: string;
   type?: DataSourceType;

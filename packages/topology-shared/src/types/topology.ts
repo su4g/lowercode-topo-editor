@@ -34,6 +34,8 @@ export const DEFAULT_TOPOLOGY_CANVAS = {
   height: 1080
 };
 
+export const DEFAULT_TOPOLOGY_TEXT_COLOR = "#fff";
+
 export type TopologyCanvasConfig = {
   width: number;
   height: number;
@@ -78,6 +80,8 @@ export type TopologyLink = {
 };
 
 export type TopologyData = {
+  /** Undefined and 1 represent legacy string-expression rule data. */
+  schemaVersion?: number;
   id: string;
   name: string;
   version: string;

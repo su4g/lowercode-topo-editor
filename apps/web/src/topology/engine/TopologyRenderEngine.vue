@@ -5,6 +5,7 @@ import { listEnabledNodeTypes } from '../services/nodeTypeApi';
 import { queryRuntime } from '../services/runtimeApi';
 import { getTopology } from '../services/topologyApi';
 import {
+  buildTopologyExpressionContext,
   defaultRuntimeSource,
   nodeIdentifier,
   nodeRuleIdentityCandidates,
@@ -188,47 +189,7 @@ function exposeSourceFieldAliases(context: ExpressionContext, sourceId: string, 
 }
 
 function buildRuntimeContext(data: TopologyData, runtime: Record<string, unknown>): ExpressionContext {
-  const context: ExpressionContext = {
-    ...expressionBaseContext(),
-    runtimeData: runtime,
-    ...runtime
-  };
-  const defaultSource = defaultRuntimeSource(data);
-
-  for (const source of data.dataSources ?? []) {
-    const sourceData = runtime[source.sourceId];
-    if (isRecord(sourceData)) {
-      exposeSourceFieldAliases(context, source.sourceId, sourceData, defaultSource?.sourceId === source.sourceId);
-      exposeSourceNodeAliases(context, source.sourceId, sourceData, data.nodes);
-    }
-  }
-
-  const defaultSourceData = defaultSource ? (runtime[defaultSource.sourceId] as Record<string, unknown> | undefined) : undefined;
-  for (const node of data.nodes) {
-    const sourceId = node.dataBinding?.sourceId;
-    if (!sourceId) {
-      if (isRecord(defaultSourceData)) exposeNodeFieldsFromRecord(context, node, defaultSourceData);
-      continue;
-    }
-
-    const sourceData = runtime[sourceId] as Record<string, unknown> | undefined;
-    if (!sourceData) continue;
-    for (const [field, value] of Object.entries(sourceData)) {
-      context[`${sourceId}.${field}`] = value;
-      context[`${node.key}.${field}`] = value;
-    }
-    for (const [alias, path] of Object.entries(node.dataBinding?.mappings ?? {})) {
-      context[`${node.key}.${alias}`] = readExpressionPath(sourceData, path);
-    }
-  }
-
-  if (defaultSource && isRecord(defaultSourceData)) {
-    for (const key of ['status', 'state']) {
-      const value = readExpressionPath(defaultSourceData, key);
-      if (value !== undefined) context[key] = value;
-    }
-  }
-  return context;
+  return buildTopologyExpressionContext(data, runtime, expressionBaseContext());
 }
 
 function buildDefaultLinkRuntime(link: TopologyLink): LinkRuntime {
@@ -292,11 +253,11 @@ function resolveRuntimeNodeText(node: TopologyNode, runtime: Record<string, unkn
 }
 
 function resolveNodeRuntime(node: TopologyNode, context: ExpressionContext, text?: string): NodeRuntime {
-  return resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node, text)).runtime;
+  return resolveNodeRuntimeWithTrace(node.displayRules ?? [], context, buildRuleCleanNodeRuntime(node, text), templateTopology.value ?? undefined).runtime;
 }
 
 function resolveLinkRuntime(link: TopologyLink, context: ExpressionContext): LinkRuntime {
-  return resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link)).runtime;
+  return resolveLinkRuntimeWithTrace(link.rules ?? [], context, buildDefaultLinkRuntime(link), templateTopology.value ?? undefined).runtime;
 }
 
 function runtimeSignature(value: unknown) {
